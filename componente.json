@@ -1,0 +1,17 @@
+{
+  "suite": "local-suite",
+  "nome": "RECON_3D",
+  "rotulo": "Reconstruções 3D",
+  "modulo_da_porta": "recon3d",
+  "repositorio": "radioterapia-ai/recon-3d",
+  "app": [
+    "radai_recon3d.py",
+    "radai_recon3d_desenho.py",
+    "radai_recon3d_screen.py",
+    "radai_recon3d_vascular.py"
+  ],
+  "baterias": [
+    "test_recon3d.py",
+    "test_recon3d_v84.py"
+  ]
+}
