@@ -18,7 +18,7 @@ with the synthetic phantoms the batteries build.
 
 The code in this repository: the three 3D reconstructions and the viewer.
 The installer, the updater and the shell shared by the six apps live in the
-[Local Suite](https://github.com/radioterapia-ai/local-suite) repository; a
+[Local Suite](https://github.com/drhenriquebraga/local-suite) repository; a
 finding there can be reported here or there. The findings that matter most:
 
 - Anything that exports a mesh, a structure or a measurement: there is no
