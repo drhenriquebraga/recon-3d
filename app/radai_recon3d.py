@@ -259,8 +259,27 @@ def _mapas_do_rtstruct(ds):
     return nomes, contornos
 
 
+def nome_padrao_das_rois(ds):
+    padroes = {}
+    try:
+        import radai_sets
+    except Exception:
+        return padroes
+    for s in getattr(ds, "StructureSetROISequence", None) or []:
+        try:
+            p = radai_sets.nome_padrao_da_descricao(
+                getattr(s, "ROIDescription", u""))
+            if p:
+                padroes[int(s.ROINumber)] = p
+        except Exception:
+            continue
+    return padroes
+
+
 def rois_do_rtstruct(ds):
     nomes, contornos = _mapas_do_rtstruct(ds)
+    # GUARDA: no STUDY com nome proprio, o que se decide por nome (osso, vaso, casca, opacidade) usa o nome padrao da descricao.
+    padroes = nome_padrao_das_rois(ds)
     fora, vistos = [], set()
     for num, nome in nomes:
         r = contornos.get(num)
@@ -279,8 +298,10 @@ def rois_do_rtstruct(ds):
             cor = None
         if cor is None:
             cor = list(_PALETA_RESERVA[num % len(_PALETA_RESERVA)])
+        padrao = padroes.get(num) or nome
         fora.append({u"nome": nome, u"numero": num, u"cor": cor,
-                     u"contornos": n, u"opacidade": opacidade_inicial(nome)})
+                     u"contornos": n, u"padrao": padrao,
+                     u"opacidade": opacidade_inicial(padrao)})
     return fora
 
 
@@ -709,7 +730,7 @@ def abrir_conjunto(caminho_rs):
     for r in rois:
         c = contornos_da_roi(ds, r[u"nome"])
         contornos[r[u"nome"]] = c
-        r[u"casca"] = e_casca(r[u"nome"])
+        r[u"casca"] = e_casca(r.get(u"padrao") or r[u"nome"])
         if c:
             todos = np.concatenate(c)
             a, b = todos.min(axis=0), todos.max(axis=0)
@@ -724,14 +745,63 @@ def abrir_conjunto(caminho_rs):
     if lo:
         caixa = [[round(float(v), 2) for v in np.min(lo, axis=0)],
                  [round(float(v), 2) for v in np.max(hi, axis=0)]]
+    plano = plano_dos_contornos(contornos)
+    if plano is not None:
+        contornos = dict((k, [_no_plano_do_corte(p, plano) for p in v])
+                         for k, v in contornos.items())
+        ws = [float(p[0, 2]) for v in contornos.values() for p in v]
+        grade = np.unique(np.round(np.asarray(ws, dtype=np.float64), 2))
     return {u"rois": [r for r in rois if contornos.get(r[u"nome"])],
-            u"contornos": contornos, u"grade_z": grade, u"caixa": caixa}
+            u"contornos": contornos, u"grade_z": grade, u"caixa": caixa,
+            u"plano": plano}
+
+
+def _no_plano_do_corte(p, plano):
+    import numpy as np
+    q = p.dot(plano.T)
+    # GUARDA: o RTSTRUCT gravado antes do acabamento no plano da imagem tem
+    # pontos ate ~2,5 mm fora do corte; cada contorno vai ao plano dele.
+    q[:, 2] = float(np.median(q[:, 2]))
+    return q
+
+
+def plano_dos_contornos(contornos, tol_mm=3.0):
+    import numpy as np
+    todos = [p for v in contornos.values() for p in v if len(p) >= 3]
+    if not todos or all(float(np.ptp(p[:, 2])) <= 0.5 for p in todos):
+        return None
+    normais = []
+    for p in sorted(todos, key=len, reverse=True)[:24]:
+        _u, s, vt = np.linalg.svd(p - p.mean(axis=0), full_matrices=False)
+        if s[1] <= 1e-6 * max(float(s[0]), 1e-12):
+            continue
+        n = vt[-1]
+        if normais and float(n.dot(normais[0])) < 0:
+            n = -n
+        normais.append(n)
+    if not normais:
+        return None
+    n = np.median(np.asarray(normais), axis=0)
+    n /= np.linalg.norm(n)
+    if abs(float(n[2])) >= 1.0 - 1e-6:
+        return None
+    linha = np.cross(np.eye(3)[int(np.argmin(np.abs(n)))], n)
+    linha /= np.linalg.norm(linha)
+    plano = np.vstack([linha, np.cross(n, linha), n])
+    # GUARDA: so gira quando os contornos sao planos num plano so (a serie
+    # sagital ou obliqua); mistura de planos fica no caminho axial.
+    planos = sum(float(np.ptp(p.dot(n))) <= tol_mm for p in todos)
+    return plano if planos >= 0.9 * len(todos) else None
 
 
 def malha_do_conjunto(conjunto, nome):
     c = conjunto[u"contornos"][nome]
-    return malha_da_estrutura(c, conjunto[u"grade_z"],
-                              face_externa=e_casca(nome))
+    lps, faces, info = malha_da_estrutura(c, conjunto[u"grade_z"],
+                                          face_externa=e_casca(nome))
+    plano = conjunto.get(u"plano")
+    if plano is not None and len(lps):
+        lps = lps.dot(plano)
+    return lps, faces, info
 
 
 TETO_TRIANGULOS_CAMADA = {u"osso": 400000, u"pele": 150000}
@@ -822,6 +892,9 @@ def nuvem_do_conjunto(conjunto, nome, cor=None, max_pontos=None):
         cor=tuple(cor or (120, 170, 255)),
         max_pontos=int(max_pontos or radai_viewer3d.MAX_PONTOS))
     d[u"nome"] = nome
+    plano = conjunto.get(u"plano")
+    if plano is not None:
+        return item_em_lps(d, origem.dot(plano), plano.T.ravel())
     return item_em_lps(d, origem, (1, 0, 0, 0, 1, 0, 0, 0, 1))
 
 
@@ -881,7 +954,8 @@ TETO_VOXELS_ROTULO = 16000000
 
 def malha_de_rotulo(mascara, espacamento_zyx, origem_xyz=(0.0, 0.0, 0.0),
                     direcao=(1, 0, 0, 0, 1, 0, 0, 0, 1),
-                    teto_triangulos=None):
+                    teto_triangulos=None, passos_mm=None, suavizar_mm=None,
+                    recusar_acima=False):
     import numpy as np
     import radai_bolus
     from scipy import ndimage
@@ -890,6 +964,8 @@ def malha_de_rotulo(mascara, espacamento_zyx, origem_xyz=(0.0, 0.0, 0.0),
         return (np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64),
                 {u"passo_mm": 0.0, u"triangulos": 0})
     teto = int(teto_triangulos or TETO_TRIANGULOS)
+    passos = tuple(float(p) for p in (passos_mm or PASSOS_ROTULO_MM))
+    suav = SUAVIZACAO_MALHA_MM if suavizar_mm is None else float(suavizar_mm)
     idx = np.argwhere(m)
     lo = idx.min(axis=0) - 1
     hi = idx.max(axis=0) + 2
@@ -912,23 +988,33 @@ def malha_de_rotulo(mascara, espacamento_zyx, origem_xyz=(0.0, 0.0, 0.0),
            - ndimage.distance_transform_edt(sub, sampling=amostra))
     sdf = np.clip(sdf, -teto_mm, teto_mm).astype(np.float32)
     escolhido = None
-    for passo in PASSOS_ROTULO_MM:
+    for passo in passos:
         novo = [max(2, int(round((n - 1) * e / passo)) + 1)
                 for n, e in zip(sdf.shape, esp)]
         if escolhido is not None and novo == escolhido[3]:
             continue
-        if float(np.prod(novo)) > TETO_CELULAS_MALHA                 and passo != PASSOS_ROTULO_MM[-1]:
+        if float(np.prod(novo)) > TETO_CELULAS_MALHA and passo != passos[-1]:
             continue
+        if recusar_acima and float(np.prod(novo)) > TETO_CELULAS_MALHA:
+            return (np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64),
+                    {u"passo_mm": float(passo), u"triangulos": 0,
+                     u"excedeu": True, u"celulas": int(np.prod(novo))})
         fat = [nv / float(n) for nv, n in zip(novo, sdf.shape)]
         r = ndimage.zoom(sdf, fat, order=1, mode="nearest")
         esp_r = tuple(e * (n - 1) / float(nv - 1)
                       for e, n, nv in zip(esp, sdf.shape, novo))
-        F = np.pad(_suavizar(r, esp_r), 1, mode="constant",
+        F = np.pad(_suavizar(r, esp_r, suav), 1, mode="constant",
                    constant_values=np.float32(teto_mm))
         escolhido = (F, esp_r, passo, novo)
         if _triangulos_estimados(F) <= teto * 1.15:
             break
     F, esp_r, passo, _novo = escolhido
+    if recusar_acima:
+        est = _triangulos_estimados(F)
+        if est > teto * 1.15:
+            return (np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64),
+                    {u"passo_mm": float(passo), u"triangulos": 0,
+                     u"excedeu": True, u"estimados": int(est)})
     verts, faces = radai_bolus.superficie(F)
     lps, faces = _mascara_em_lps(verts, faces, esp_r, origem_xyz, direcao,
                                  tuple(desl))
@@ -941,6 +1027,16 @@ _PALAVRAS_DE_VASO = (u"aort", u"arter", u"vein", u"vena", u"venous",
                      u"brachiocephalic", u"brachioceph", u"iliac", u"portal",
                      u"cava", u"venacava", u"vasc", u"pulmonary_v",
                      u"pulmonary_a")
+
+
+def e_osso(nome):
+    if e_vaso(nome):
+        return False
+    try:
+        import engine
+        return engine.familia_de(str(nome or u"").lower()) == "osso"
+    except Exception:
+        return False
 
 
 def e_vaso(nome):

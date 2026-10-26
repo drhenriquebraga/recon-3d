@@ -3,6 +3,7 @@ import os
 import threading
 
 import radai_menu
+import radai_recon3d_gl
 import radai_web
 
 
@@ -333,7 +334,8 @@ def estruturas_da_serie(b, rs=u""):
                             "opacidade": r["opacidade"],
                             "casca": bool(r.get("casca")),
                             "achado": bool(r.get("achado")),
-                            "vaso": R.e_vaso(r["nome"]),
+                            "vaso": R.e_vaso(r.get("padrao") or r["nome"]),
+                            "osso": R.e_osso(r.get("padrao") or r["nome"]),
                             "caixa": r.get("caixa")} for r in c["rois"]],
             "caixa": c.get("caixa"), "eixos": list(R.EIXOS_LPS),
             "camadas": _camadas(b), "marcar_ate": MARCAR_TODAS_ATE,
@@ -447,7 +449,10 @@ CSS = u"""
 .r3-tag.apagada{border-color:var(--line-strong);color:var(--text-dim)}
 .r3-vazio{margin:6px 2px;font-size:12.5px;color:var(--text-muted)}
 .r3-pasta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
-.r3-pasta input{flex:1 1 320px;min-width:0;padding:8px 10px;border-radius:6px;
+.r3-pasta-campo{display:flex;gap:6px;align-items:stretch;flex:1 1 320px;min-width:0}
+.r3-filtro{margin:0 0 10px}
+#r3_busca{margin:0 0 8px}
+.r3-pasta input{flex:1 1 auto;min-width:0;padding:8px 10px;border-radius:6px;
  border:1px solid var(--line-strong);background:var(--panel-2);color:var(--text);
  font-family:var(--mono);font-size:12px}
 .r3-pasta input:focus{outline:none;border-color:var(--accent)}
@@ -457,8 +462,27 @@ CSS = u"""
 .r3-estado .ui-bt{margin-left:8px}
 .r3-3d{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:12px;align-items:stretch}
 @media (max-width:980px){.r3-3d{grid-template-columns:minmax(0,1fr)}}
-.r3-tela3d{position:relative;border-radius:8px;background:#000;overflow:hidden;
+.r3-col3d{display:flex;flex-direction:column;gap:6px;min-width:0;
  height:min(68vh,620px);min-height:300px}
+.r3-tela3d{position:relative;border-radius:8px;background:var(--img-fundo);overflow:hidden;
+ flex:1 1 auto;min-height:220px}
+.r3-inc3d{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;flex:none}
+.r3-inc3d .g{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.r3-inc{display:inline-flex;flex-direction:column;align-items:flex-start;gap:1px;
+ padding:3px 8px;min-height:28px;border-radius:6px;border:1px solid var(--line);
+ background:var(--panel);color:var(--text-muted);font-size:11px;line-height:1.15;cursor:pointer}
+.r3-inc small{font-family:var(--mono);font-size:10px;color:var(--text-dim)}
+.r3-inc:hover{color:var(--text);border-color:var(--line-strong)}
+.r3-inc[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.r3-inc[aria-pressed="true"] small{color:inherit}
+.r3-inc:focus-visible,.r3-atraves:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.r3-barra{display:inline-flex;align-items:center;gap:6px}
+.r3-barra .r3-bl{font-family:var(--mono);font-size:11px;color:var(--text-muted)}
+.r3-barra input[type=range]{width:140px;accent-color:var(--mod-recon)}
+.r3-barra.cra input[type=range]{width:96px}
+.r3-barra b{font-family:var(--mono);font-size:11.5px;font-weight:500;color:var(--text);
+ min-width:60px}
+.r3-atraves[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
 .r3-tela3d canvas{position:absolute;left:0;top:0;display:block;width:100%;height:100%;
  cursor:grab;touch-action:none}
 .r3-tela3d canvas:active{cursor:grabbing}
@@ -679,25 +703,18 @@ function r3LinhaPasta(s){
                   : '<span class="r3-tag apagada">' + r3Frase('sem segmentação') + '</span>')
   + '</button>';
 }
+var R3_USO_DA_VARREDURA = 'recon3d';
 function r3Listar(pasta){
  var alvo = r3El('r3_lista_pasta'); if(!alvo) return;
- r3Vazio(alvo, 'carregando…');
- r3Post('/api/recon3d/series', {pasta: pasta || '', todas: true}).then(function(d){
-  R3.lista = d.series || [];
-  var avisos = (d.avisos || []).map(function(t){
-   return '<p class="r3-vazio"><span data-radai-frase>' + r3Esc(t) + '</span></p>' }).join('');
-  if(!R3.lista.length){
-   alvo.innerHTML = '<p class="r3-vazio"><span data-radai-frase>'
-    + r3Esc(d.erro || 'Nenhuma série nesta pasta.') + '</span></p>' + avisos;
-   r3Traduzir(); return;
-  }
-  alvo.innerHTML = R3.lista.map(r3LinhaPasta).join('') + avisos;
-  r3Traduzir();
- }).catch(function(){ r3Vazio(alvo, 'não consegui listar esta pasta') });
+ pasta = (pasta || '').trim();
+ if(!pasta){ if(window.uiTremer) window.uiTremer(r3El('r3_pasta')); return }
+ if(!window.uiVarrerLista){ r3Vazio(alvo, 'não consegui listar esta pasta'); return }
+ window.uiVarrerLista({alvo: 'r3_lista_pasta', estado: 'r3_busca',
+  uso: R3_USO_DA_VARREDURA, chave: 'recon3d', pasta: pasta, dias: 'r3_dias',
+  linha: r3LinhaPasta, vazio: 'Nenhuma série nesta pasta.'});
 }
 function r3Outra(){
- var p = (r3El('r3_pasta').value || '').trim();
- if(p) r3Listar(p);
+ r3Listar(r3El('r3_pasta').value || '');
 }
 function r3Procurar(bt){
  if(!window.uiExplorador) return;
@@ -1204,7 +1221,7 @@ function r3vSalvar(){
 }
 """
 
-JS_MALHA = u"""
+JS_MALHA = radai_recon3d_gl.JS + u"""
 var R3_EIXOS = ['esq', 'post', 'sup'];
 // GUARDA: o zoom inicial é 25% acima do quadro que cabe a cena inteira.
 var R3_ZOOM_INICIAL = 1.25;
@@ -1224,84 +1241,6 @@ var R3M = {modo: '', b: '', rs: '', arquivos: [], estr: [], cam: [],
 var R3_DESENHO = '#desenho';
 var R3_COR_DESENHO = [250, 204, 21];
 
-var R3G_VS = ['attribute vec3 aPos;', 'attribute vec3 aNrm;',
- 'uniform mat3 uRot;', 'uniform vec3 uCentro;', 'uniform vec2 uEsc;',
- 'uniform vec2 uDesl;', 'uniform float uProf;', 'varying vec3 vN;',
- 'void main(){', ' vec3 p = uRot * (aPos - uCentro);', ' vN = uRot * aNrm;',
- ' gl_Position = vec4(p.x * uEsc.x + uDesl.x, p.y * uEsc.y + uDesl.y,',
- '                    -p.z * uProf, 1.0);', '}'].join(' ');
-var R3G_FS = ['precision mediump float;', 'uniform vec3 uCor;',
- 'uniform float uAlfa;', 'varying vec3 vN;', 'void main(){',
- ' vec3 n = normalize(vN);', ' if(n.z < 0.0) n = -n;',
- ' vec3 L = normalize(vec3(-0.35, 0.5, 1.0));',
- ' vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));',
- ' float d = max(dot(n, L), 0.0);',
- ' float s = pow(max(dot(n, H), 0.0), 40.0);',
- ' vec3 c = uCor * (0.26 + 0.74 * d) + vec3(0.36) * s;',
- ' gl_FragColor = vec4(min(c, vec3(1.0)), uAlfa);', '}'].join(' ');
-
-function r3gLerStl(buf){
- if(!buf || buf.byteLength < 84) throw new Error('STL curto');
- var dv = new DataView(buf);
- var T = dv.getUint32(80, true);
- if(84 + 50 * T !== buf.byteLength) throw new Error('STL de tamanho errado');
- var cap = 1024; while(cap < T * 6) cap *= 2;
- var mask = cap - 1, tab = new Int32Array(cap);
- for(var q = 0; q < cap; q++) tab[q] = -1;
- var bits = new Uint32Array(T * 9), pos = new Float32Array(T * 9);
- var idx = new Uint32Array(T * 3), nv = 0;
- var lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
- for(var t = 0; t < T; t++){
-  for(var k = 0; k < 3; k++){
-   var o = 84 + 50 * t + 12 + 12 * k;
-   var a = dv.getUint32(o, true), b = dv.getUint32(o + 4, true),
-       c = dv.getUint32(o + 8, true);
-   var h = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663)
-            ^ Math.imul(c, 83492791)) & mask;
-   var j = tab[h];
-   while(j >= 0 && !(bits[3*j] === a && bits[3*j+1] === b && bits[3*j+2] === c)){
-    h = (h + 1) & mask; j = tab[h];
-   }
-   if(j < 0){
-    j = nv++; tab[h] = j;
-    bits[3*j] = a; bits[3*j+1] = b; bits[3*j+2] = c;
-    for(var e = 0; e < 3; e++){
-     var x = dv.getFloat32(o + 4 * e, true);
-     pos[3*j+e] = x;
-     if(x < lo[e]) lo[e] = x;
-     if(x > hi[e]) hi[e] = x;
-    }
-   }
-   idx[3*t+k] = j;
-  }
- }
- pos = pos.slice(0, nv * 3);
- var nrm = new Float32Array(nv * 3);
- for(var f = 0; f < T; f++){
-  var i0 = 3*idx[3*f], i1 = 3*idx[3*f+1], i2 = 3*idx[3*f+2];
-  var ux = pos[i1] - pos[i0], uy = pos[i1+1] - pos[i0+1], uz = pos[i1+2] - pos[i0+2];
-  var vx = pos[i2] - pos[i0], vy = pos[i2+1] - pos[i0+1], vz = pos[i2+2] - pos[i0+2];
-  var nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-  nrm[i0] += nx; nrm[i0+1] += ny; nrm[i0+2] += nz;
-  nrm[i1] += nx; nrm[i1+1] += ny; nrm[i1+2] += nz;
-  nrm[i2] += nx; nrm[i2+1] += ny; nrm[i2+2] += nz;
- }
- for(var v = 0; v < nv; v++){
-  var l = Math.sqrt(nrm[3*v]*nrm[3*v] + nrm[3*v+1]*nrm[3*v+1] + nrm[3*v+2]*nrm[3*v+2]);
-  if(l > 1e-12){ nrm[3*v] /= l; nrm[3*v+1] /= l; nrm[3*v+2] /= l }
-  else { nrm[3*v] = 0; nrm[3*v+1] = 0; nrm[3*v+2] = 1 }
- }
- var centro = T ? [(lo[0]+hi[0])/2, (lo[1]+hi[1])/2, (lo[2]+hi[2])/2] : [0, 0, 0];
- return {pos: pos, nrm: nrm, idx: idx, nv: nv, T: T, lo: lo, hi: hi,
-         centro: centro};
-}
-
-function r3gCompilar(gl, tipo, fonte){
- var s = gl.createShader(tipo);
- gl.shaderSource(s, fonte); gl.compileShader(s);
- if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)) return null;
- return s;
-}
 function r3gDetectar(){
  var c = r3El('cvGL');
  if(!c) return 'sem o quadro do 3D';
@@ -1310,25 +1249,11 @@ function r3gDetectar(){
  try{ gl = c.getContext('webgl', op) || c.getContext('experimental-webgl', op) }
  catch(e){ gl = null }
  if(!gl) return 'o navegador não criou um contexto WebGL';
- var vs = r3gCompilar(gl, gl.VERTEX_SHADER, R3G_VS);
- var fs = r3gCompilar(gl, gl.FRAGMENT_SHADER, R3G_FS);
- if(!vs || !fs) return 'o WebGL deste navegador não compilou o sombreador';
- var p = gl.createProgram();
- gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
- if(!gl.getProgramParameter(p, gl.LINK_STATUS))
-  return 'o WebGL deste navegador não ligou o sombreador';
- R3G.gl = gl; R3G.canvas = c; R3G.prog = p;
- R3G.u32 = gl.getExtension('OES_element_index_uint');
- ['aPos', 'aNrm'].forEach(function(n){ R3G.loc[n] = gl.getAttribLocation(p, n) });
- ['uRot', 'uCentro', 'uEsc', 'uDesl', 'uProf', 'uCor', 'uAlfa'].forEach(
-  function(n){ R3G.loc[n] = gl.getUniformLocation(p, n) });
+ var V = {};
+ var motivo = r3gPrograma(V, gl);
+ if(motivo) return motivo;
+ R3G.gl = gl; R3G.canvas = c; R3G.prog = V.prog; R3G.loc = V.loc; R3G.u32 = V.u32;
  return '';
-}
-
-function r3gAjustar(c){
- var r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
- var w = Math.max(80, Math.round(r.width * d)), h = Math.max(80, Math.round(r.height * d));
- if(c.width !== w || c.height !== h){ c.width = w; c.height = h }
 }
 function r3gM(){ if(!R3G.M) R3G.M = n3MatrizInicial(R3_EIXOS); return R3G.M }
 function r3gPedir(){
@@ -1338,38 +1263,14 @@ function r3gPedir(){
 }
 
 function r3gSubir(chave, m, cor){
- var gl = R3G.gl; if(!gl) return;
+ if(!R3G.gl) return;
  r3gSoltar(chave);
- var o = {n: 0, tipo: null, cor: cor || [170, 170, 170], centro: m.centro};
- var pos = m.pos, nrm = m.nrm;
- if(m.nv > 65535 && !R3G.u32){
-  pos = new Float32Array(m.T * 9); nrm = new Float32Array(m.T * 9);
-  for(var i = 0; i < m.T * 3; i++){
-   var v = m.idx[i];
-   for(var e = 0; e < 3; e++){ pos[3*i+e] = m.pos[3*v+e]; nrm[3*i+e] = m.nrm[3*v+e] }
-  }
-  o.n = m.T * 3;
- } else {
-  o.ibo = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, o.ibo);
-  if(m.nv <= 65535){
-   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(m.idx), gl.STATIC_DRAW);
-   o.tipo = gl.UNSIGNED_SHORT;
-  } else {
-   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, m.idx, gl.STATIC_DRAW);
-   o.tipo = gl.UNSIGNED_INT;
-  }
-  o.n = m.T * 3;
- }
- o.vbo = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, o.vbo);
- gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
- o.nbo = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, o.nbo);
- gl.bufferData(gl.ARRAY_BUFFER, nrm, gl.STATIC_DRAW);
- R3G.objs[chave] = o;
+ var o = r3gSubirEm(R3G, m, cor);
+ if(o) R3G.objs[chave] = o;
 }
 function r3gSoltar(chave){
- var gl = R3G.gl, o = R3G.objs[chave]; if(!o) return;
- if(gl){ [o.vbo, o.nbo, o.ibo].forEach(function(b){ if(b) gl.deleteBuffer(b) }) }
+ var o = R3G.objs[chave]; if(!o) return;
+ r3gSoltarObj(R3G, o);
  delete R3G.objs[chave];
 }
 function r3gLimpar(){ Object.keys(R3G.objs).forEach(r3gSoltar) }
@@ -1385,21 +1286,7 @@ function r3gCena(caixa){
  R3M.baseN = 0;
 }
 
-function r3gUm(o, alfa){
- var gl = R3G.gl, L = R3G.loc;
- gl.bindBuffer(gl.ARRAY_BUFFER, o.vbo);
- gl.vertexAttribPointer(L.aPos, 3, gl.FLOAT, false, 0, 0);
- gl.bindBuffer(gl.ARRAY_BUFFER, o.nbo);
- gl.vertexAttribPointer(L.aNrm, 3, gl.FLOAT, false, 0, 0);
- gl.uniform3f(L.uCor, o.cor[0] / 255, o.cor[1] / 255, o.cor[2] / 255);
- gl.uniform1f(L.uAlfa, alfa);
- if(o.tipo){
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, o.ibo);
-  gl.drawElements(gl.TRIANGLES, o.n, o.tipo, 0);
- } else {
-  gl.drawArrays(gl.TRIANGLES, 0, o.n);
- }
-}
+function r3gUm(o, alfa){ r3gUmEm(R3G, o, alfa) }
 function r3gDesenhar(){
  R3G.pedido = false;
  var gl = R3G.gl, c = R3G.canvas; if(!gl || !c) return;
@@ -1411,13 +1298,11 @@ function r3gDesenhar(){
  var M = r3gM(), L = R3G.loc;
  gl.useProgram(R3G.prog);
  gl.enableVertexAttribArray(L.aPos); gl.enableVertexAttribArray(L.aNrm);
- gl.uniformMatrix3fv(L.uRot, false, [M[0], M[3], M[6], M[1], M[4], M[7],
-                                     M[2], M[5], M[8]]);
- gl.uniform3f(L.uCentro, R3G.centro[0], R3G.centro[1], R3G.centro[2]);
  var esc = R3G.zoom * 0.46 * Math.min(w, h) / R3G.raio;
- gl.uniform2f(L.uEsc, 2 * esc / w, 2 * esc / h);
- gl.uniform2f(L.uDesl, 2 * R3G.ux / w, -2 * R3G.uy / h);
- gl.uniform1f(L.uProf, 1 / (R3G.raio * 2.5));
+ r3gCamera(R3G, r3gOrto(M, R3G.centro, 2 * esc / w, 2 * esc / h,
+                        2 * R3G.ux / w, -2 * R3G.uy / h, 1 / (R3G.raio * 2.5)),
+           r3gNrmDe(M));
+ r3gCorte(R3G, null); r3gLiso(R3G, false);
  var opacos = [], trans = [];
  r3mVisiveis().forEach(function(par){
   var o = par[0], a = par[1];
@@ -1447,6 +1332,7 @@ function r3gDesenhar(){
   if(window.N3) N3.eixos = R3_EIXOS;
   n3Bussola(g, cb, M);
  }
+ if(typeof r3IncSincronizar === 'function') r3IncSincronizar();
  if(window.r3vQuadro) r3vQuadro();
 }
 
@@ -1581,6 +1467,93 @@ function r3Vista(qual){
  r3Animar(M, R3_TRANSICAO_MS);
 }
 
+function r3IncAng(v, pos, neg){
+ var n = Math.round(+v || 0);
+ return (n < 0 ? neg : pos) + ' ' + Math.abs(n) + '°';
+}
+function r3MatrizDaIncidencia(lao, cra){
+ var b = radaiIncidencia(lao, cra);
+ return [b.r[0], b.r[1], b.r[2], b.u[0], b.u[1], b.u[2], b.d[0], b.d[1], b.d[2]];
+}
+// GUARDA: a frente da tela (linha 3 de M) é o detector; dela saem o LAO e o CRA da convenção do Nidus.
+function r3IncDe(M){
+ var cra = Math.asin(Math.max(-1, Math.min(1, M[8]))) * 180 / Math.PI;
+ var lao = (Math.abs(M[8]) > 0.99999) ? 0 : Math.atan2(M[6], -M[7]) * 180 / Math.PI;
+ return [Math.round(lao), Math.round(cra)];
+}
+function r3IncSincronizar(lao, cra){
+ var r = r3El('r3_lao'), c = r3El('r3_cra');
+ if(!r || !c) return;
+ if(lao == null){
+  var M = (R3M.modo === 'gl') ? R3G.M : ((typeof N3 !== 'undefined') ? N3.M : null);
+  if(!M) return;
+  var a = r3IncDe(M); lao = a[0]; cra = a[1];
+ }
+ if(R3M.incVisto === lao + ',' + cra) return;
+ R3M.incVisto = lao + ',' + cra;
+ r.value = String(lao); c.value = String(cra);
+ var lv = r3El('r3_lao_v'), cv = r3El('r3_cra_v');
+ if(lv) lv.textContent = r3IncAng(lao, 'LAO', 'RAO');
+ if(cv) cv.textContent = r3IncAng(cra, 'CRA', 'CAU');
+ var bs = document.querySelectorAll ? document.querySelectorAll('.r3-inc') : [];
+ for(var i = 0; i < bs.length; i++)
+  bs[i].setAttribute('aria-pressed', (+bs[i].getAttribute('data-lao') === lao
+   && +bs[i].getAttribute('data-cra') === cra) ? 'true' : 'false');
+}
+function r3IncAplicar(lao, cra, animar){
+ var M = r3MatrizDaIncidencia(lao, cra);
+ if(R3M.modo !== 'gl'){
+  if(typeof N3 !== 'undefined' && typeof n3Desenhar === 'function'){
+   R3M.animN = null; N3.M = M; N3.chaveM = JSON.stringify(N3.eixos || null);
+   N3.ux = 0; N3.uy = 0; n3Desenhar();
+  }
+ } else if(animar && R3G.gl && !r3MenosMovimento()){
+  r3Animar(M, R3_TRANSICAO_MS);
+ } else {
+  R3G.anim = null; R3G.M = M; r3gPedir();
+ }
+ r3IncSincronizar(Math.round(lao), Math.round(cra));
+}
+function r3IncBarra(){
+ var r = r3El('r3_lao'), c = r3El('r3_cra'); if(!r || !c) return;
+ r3IncAplicar(+r.value || 0, +c.value || 0, false);
+}
+var R3_ATRAVES = {osso: 0.1, pele: 0.03};
+function r3AtravesAlvo(k){
+ if(k === '@osso') return R3_ATRAVES.osso;
+ if(k === '@pele') return R3_ATRAVES.pele;
+ for(var i = 0; i < R3M.estr.length; i++){
+  var e = R3M.estr[i];
+  if(e.nome !== k) continue;
+  if(e.casca) return R3_ATRAVES.pele;
+  if(e.osso) return R3_ATRAVES.osso;
+ }
+ return null;
+}
+function r3AtravesPintar(){
+ var b = r3El('r3_atraves'); if(!b) return;
+ b.setAttribute('aria-pressed', R3M.atraves ? 'true' : 'false');
+ b.disabled = (R3M.modo !== 'gl');
+}
+// GUARDA: o Ver através guarda a opacidade de antes e a devolve; nunca sobe a de quem já estava mais baixa.
+function r3Atraves(){
+ if(R3M.modo !== 'gl') return;
+ if(!R3M.atraves){
+  R3M.atravesAntes = {};
+  r3mChaves().forEach(function(k){
+   var a = r3AtravesAlvo(k); if(a == null) return;
+   var atual = (R3M.alfa[k] == null) ? 1 : R3M.alfa[k];
+   R3M.atravesAntes[k] = R3M.alfa[k];
+   R3M.alfa[k] = Math.min(a, atual);
+  });
+  R3M.atraves = true;
+ } else {
+  for(var k in (R3M.atravesAntes || {})) R3M.alfa[k] = R3M.atravesAntes[k];
+  R3M.atravesAntes = {}; R3M.atraves = false;
+ }
+ r3AtravesPintar(); r3mPintarLista(); r3gPedir();
+}
+
 function r3mIniciar(){
  r3mOuvir();
  var motivo = r3gDetectar();
@@ -1590,6 +1563,7 @@ function r3mIniciar(){
  if(c) c.hidden = false; if(b) b.hidden = false; if(n) n.hidden = true;
  r3mModo('WebGL');
  r3gLigar(c);
+ r3AtravesPintar();
  r3gPedir();
 }
 function r3mRecuo(motivo){
@@ -1604,6 +1578,7 @@ function r3mRecuo(motivo){
   var m = r3El('r3_motivo3d'); if(m) m.textContent = motivo || '';
  }
  r3mModo('nuvem de pontos');
+ R3M.atraves = false; r3AtravesPintar();
  if(!jaEra && R3M.estr.length){ r3mPintarLista(); r3mSincronizar() }
 }
 function r3mModo(t){
@@ -1649,6 +1624,7 @@ function r3mEstruturas(rs){
    R3M.estr = (d.estruturas || []).filter(function(e){
     return !R3M.soVasos || e.vaso });
    R3M.semSeg = !!d.sem_segmentacao;
+   R3M.atraves = false; R3M.atravesAntes = {}; r3AtravesPintar();
    R3M.cam = R3M.semTC ? [] : (d.camadas || []);
    R3M.caixa = d.caixa || null;
    r3gCena(R3M.caixa);
@@ -2042,15 +2018,21 @@ def _html_passo_serie():
     import radai_ui
     acervo = radai_tabela_acervo.html(u"r3_acervo")
     pasta = (u'<div class="r3-pasta">'
+             u'<div class="r3-pasta-campo">'
              u'<input type="text" id="r3_pasta" autocomplete="off" '
              u'spellcheck="false" placeholder="pasta com as séries" '
-             u'aria-label="pasta com as séries">'
+             u'aria-label="pasta com as séries">%s</div>'
              u'<button type="button" class="ui-bt" onclick="r3Procurar(this)">'
              u'%s<span data-radai-frase>Procurar</span></button>'
              u'<button type="button" class="ui-bt pri" onclick="r3Outra()">'
              u'<span data-radai-frase>Listar</span></button></div>'
+             u'<div class="r3-filtro">%s</div>'
+             u'<div class="ui-vl-est" id="r3_busca" role="status" '
+             u'aria-live="polite"></div>'
              u'<div class="r3-lista" id="r3_lista_pasta" role="listbox" '
-             u'aria-label="séries da pasta"></div>' % radai_ui.icone(u"pasta"))
+             u'aria-label="séries da pasta"></div>'
+             % (radai_ui.botao_favorita(u"r3_pasta"), radai_ui.icone(u"pasta"),
+                radai_ui.filtro_de_data(u"r3_dias")))
     abas = radai_ui.abas_de_serie(u"r3_origem",
                                   [(u"acervo", u"Acervo local", acervo),
                                    (u"pasta", u"Aponte uma pasta", pasta)],
@@ -2068,6 +2050,35 @@ _VISTAS = ((u"ant", u"anterior", u"A"), (u"post", u"posterior", u"P"),
            (u"esq", u"esquerda do paciente", u"E"),
            (u"dir", u"direita do paciente", u"D"),
            (u"sup", u"superior", u"S"), (u"inf", u"inferior", u"I"))
+
+
+def _html_incidencias_3d():
+    import radai_nidus
+    import radai_ui
+    bts = u"".join(
+        u'<button type="button" class="r3-inc" data-lao="%d" data-cra="%d" '
+        u'aria-pressed="false" onclick="r3IncAplicar(%d,%d,true)">'
+        u'<span>%s</span><small translate="no">%s</small>'
+        u'</button>' % (int(lao), int(cra), int(lao), int(cra), nome,
+                        radai_nidus.rotulo_do_angulo(lao, cra))
+        for nome, lao, cra in radai_nidus.INCIDENCIAS)
+    return (u'<div class="r3-inc3d" id="r3_inc3d">'
+            u'<button type="button" class="ui-bt r3-atraves" id="r3_atraves" '
+            u'aria-pressed="false" onclick="r3Atraves()" '
+            u'title="osso e pele translúcidos de uma vez">%s'
+            u'<span data-radai-frase>Ver através</span></button>'
+            u'<span class="r3-barra"><span class="r3-bl" translate="no">RAO</span>'
+            u'<input type="range" id="r3_lao" min="-180" max="180" step="1" '
+            u'value="0" aria-label="LAO/RAO" oninput="r3IncBarra()">'
+            u'<span class="r3-bl" translate="no">LAO</span>'
+            u'<b id="r3_lao_v" translate="no">LAO 0°</b></span>'
+            u'<span class="r3-barra cra"><span class="r3-bl" translate="no">CAU</span>'
+            u'<input type="range" id="r3_cra" min="-90" max="90" step="1" '
+            u'value="0" aria-label="CRA/CAU" oninput="r3IncBarra()">'
+            u'<span class="r3-bl" translate="no">CRA</span>'
+            u'<b id="r3_cra_v" translate="no">CRA 0°</b></span>'
+            u'<div class="g" role="group" aria-label="incidência">%s</div></div>'
+            % (radai_ui.icone(u"atraves"), bts))
 
 
 def html_palco(fer, desenho=False):
@@ -2106,7 +2117,7 @@ def html_palco(fer, desenho=False):
             % (AVISO_CURTO_DA_GRAVACAO, ATO_DA_GRAVACAO,
                _ajuda_da_gravacao()))
     return (
-        u'<div class="r3-q3d"><div class="r3-3d">'
+        u'<div class="r3-q3d"><div class="r3-3d"><div class="r3-col3d">'
         u'<div class="r3-tela3d" id="r3_tela3d">'
         u'<canvas id="cvGL" hidden aria-label="reconstrução 3D das estruturas">'
         u'</canvas><canvas id="cv3Db" hidden aria-hidden="true"></canvas>'
@@ -2119,7 +2130,7 @@ def html_palco(fer, desenho=False):
         u'<span class="r3-rec" id="r3_rec" hidden><i></i>REC '
         u'<b id="r3_rec_t">00:00</b></span>'
         u'<span class="r3-dica3d" id="dica3d" data-radai-frase>escolha uma '
-        u'série</span></div>'
+        u'série</span></div>%s</div>'
         u'<aside class="r3-l3d" aria-label="estruturas do 3D">'
         u'<div class="r3-l3cab">'
         u'<label for="r3_rs" data-radai-frase>conjunto de contornos</label>'
@@ -2139,7 +2150,7 @@ def html_palco(fer, desenho=False):
         u'<p class="r3-aviso3d" id="r3_aviso3d" hidden><span data-radai-frase>'
         u'Este navegador não desenha WebGL: o 3D aparece em nuvem de pontos, '
         u'sem transparência.</span> <code id="r3_motivo3d"></code></p></div>'
-        % (vistas, dsn, grav))
+        % (vistas, _html_incidencias_3d(), dsn, grav))
 
 
 def _html_miniaturas():
@@ -2195,7 +2206,9 @@ def pagina(ferramenta="geral"):
                            + _html_miniaturas(), ident=u"r3_p2")
     corpo = (_html_cabeca(fer, AJUDA_DA_TELA[fer]) + _html_passo_serie()
              + palco + radai_ui.alerta(ALERTA_DA_TELA))
-    js = (radai_viewer.JS_3D + JS_MALHA + JS_GRAVAR + JS_SERIE
+    import radai_nidus
+    js = (radai_viewer.JS_3D + radai_nidus.JS_CONVENCAO + JS_MALHA + JS_GRAVAR
+          + JS_SERIE
           + (JS_DESENHO if fer == "toracica" else u""))
     return (u'<!doctype html><html><head><meta charset="utf-8">'
             u'<title>%s &middot; Reconstru&ccedil;&otilde;es 3D</title>'
@@ -2209,6 +2222,8 @@ def pagina(ferramenta="geral"):
 def montar(app):
     from fastapi import Request
     from fastapi.responses import HTMLResponse, Response
+
+    registrar_varredura()
 
     @app.get("/recon3d/anatomia", response_class=HTMLResponse)
     def _tela():
@@ -2283,50 +2298,6 @@ def montar(app):
         return Response(content=dados, media_type="application/octet-stream",
                         headers={"Cache-Control": "no-store",
                                  "X-Content-Type-Options": "nosniff"})
-
-    @app.post("/api/recon3d/series")
-    async def _series(request: Request):
-        try:
-            c = await request.json() or {}
-            import radai_config
-            import radai_viewseg
-            pasta = str(c.get("pasta") or "").strip()
-            if c.get("todas"):
-                if not pasta:
-                    pasta = radai_config.root_configurado()
-                if not pasta:
-                    return {"series": [],
-                            "erro": u"escolha a pasta com as séries"}
-                lista, erro, avisos = await radai_web.no_threadpool(
-                    series_da_pasta, pasta)
-                return {"series": lista, "erro": erro, "avisos": avisos}
-            if not pasta:
-                pasta = radai_config.root_configurado()
-            if not pasta:
-                return {"series": [], "erro": u"A pasta dos exames ainda não "
-                                              u"foi configurada. Abra "
-                                              u"Configurações, ou use "
-                                              u"«outra pasta…» aqui."}
-            lista, erro = await radai_web.no_threadpool(
-                radai_viewseg.series_contornadas, pasta)
-            import radai_thumbnail
-            enxuta = [{"bilhete": radai_thumbnail.bilhete(s["pasta"],
-                                                          s.get("uid") or ""),
-                       "curto": s.get("curto", ""), "desc": s.get("desc", ""),
-                       "cortes": s.get("cortes", 0),
-                       "espessura_mm": s.get("espessura_mm")}
-                      for s in lista]
-            uid_pedido = str(c.get("uid") or "").strip()
-            escolhida = -1
-            if uid_pedido:
-                for i, s in enumerate(lista):
-                    if str(s.get("uid") or "") == uid_pedido:
-                        escolhida = i
-                        break
-            return {"series": enxuta, "erro": erro, "escolhida": escolhida}
-        except Exception as e:
-            return {"series": [],
-                    "erro": u"%s: %s" % (type(e).__name__, str(e)[:200])}
 
     def _pasta_do_bilhete(b):
         import radai_thumbnail
@@ -2475,36 +2446,30 @@ def acervo(ferramenta, limite=60):
     return r
 
 
-def series_da_pasta(pasta):
-    import radai_dicom
+USO_DA_VARREDURA = "recon3d"
+MIN_CORTES = 2
+
+
+def linha_da_pasta(linha, pasta, s):
+    if int(s.get("cortes") or 0) < MIN_CORTES:
+        return False
     import radai_sets
-    import radai_thumbnail
-    raiz = radai_dicom.caminho_longo(pasta)
-    if not os.path.isdir(raiz):
-        return [], u"não consegui listar esta pasta", []
+    uid = str(s.get("uid") or u"")
     try:
-        b = radai_dicom.buscar_series(raiz, modalidades=("CT", "MR"),
-                                      min_cortes=2)
-    except Exception:
-        return [], u"não consegui listar esta pasta", []
-    fora = []
-    for s in sorted(b["series"], key=lambda x: (x["data"], x["descricao"])):
-        real, uid = s["pasta"], s["uid"]
-        try:
-            nomes = [n for n in os.listdir(real) if n.startswith("RS_RadAI_")]
-        except OSError:
-            nomes = []
-        meta = _rotulos_meta(real, uid) if uid else None
-        fora.append({"bilhete": radai_thumbnail.bilhete(real, uid),
-                     "curto": uid[-12:], "desc": s["descricao"],
-                     "pid": s["pid"], "date": s["data"],
-                     "modalidade": s["modalidade"], "cortes": s["cortes"],
-                     "espessura_mm": s["espessura_mm"],
-                     "segmentada": bool(radai_sets.arquivos_da_serie(nomes, uid))
-                     or meta is not None,
-                     "estudo_3d": list((meta or {}).get("protocolos") or [])})
-    return (fora, (u"" if fora else u"Nenhuma série nesta pasta."),
-            radai_dicom.avisos_da_busca(b))
+        nomes = [n for n in os.listdir(pasta) if n.startswith("RS_RadAI_")]
+    except OSError:
+        nomes = []
+    meta = _rotulos_meta(pasta, uid) if uid else None
+    linha["segmentada"] = (bool(radai_sets.arquivos_da_serie(nomes, uid))
+                           or meta is not None)
+    linha["estudo_3d"] = list((meta or {}).get("protocolos") or [])
+    return True
+
+
+def registrar_varredura():
+    import radai_varrer
+    return radai_varrer.registrar_series_de_pasta(USO_DA_VARREDURA,
+                                                  enriquecer=linha_da_pasta)
 
 
 def ler_ficha(ficha):

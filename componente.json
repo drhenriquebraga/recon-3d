@@ -7,6 +7,7 @@
   "app": [
     "radai_recon3d.py",
     "radai_recon3d_desenho.py",
+    "radai_recon3d_gl.py",
     "radai_recon3d_screen.py",
     "radai_recon3d_vascular.py"
   ],

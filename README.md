@@ -22,7 +22,11 @@ slices, thickness, structures, mode, tasks, when it was contoured), or arrives
 from ContourLab's *View segmentation* by a ticket — never by a path in the
 URL. The mesh of each structure comes from the RTSTRUCT of that series, or
 from the label map of a 3D study; with no segmentation at all, the 3D view
-shows bone and skin by CT density.
+shows bone and skin by CT density. An RTSTRUCT drawn on sagittal, coronal or
+oblique slices (an MR, for example) becomes a mesh in place, each contour on
+its own slice plane. When the delivered set carries the workstation's own
+structure names, bone, vessel, skin and opacity are still decided by the
+standard name each structure keeps in its description.
 
 Three tools, inside the suite:
 
@@ -34,14 +38,23 @@ Three tools, inside the suite:
   rest of that protocol, in 3D. A drawing on the axial slices is interpolated
   between slices and shown in 3D; it is yours, and it is not saved.
 - **Vascular** — surfaces, the course of the vessels, and synthetic
-  two‑dimensional projections in a free incidence (with the AP, Towne and
-  Caldwell views at hand). The bone can be taken out of the projection by a
-  density threshold, and a vessel closer than 2 mm to bone (in the carotid
-  canal, in the transverse foramen) goes with it; showing the bone gives it
-  back.
+  two‑dimensional projections in a free incidence (with the AP, Towne —
+  CRA 30 — and Caldwell — CAU 15 — views at hand, in the C‑arm convention of
+  Nidus RT). The bone is taken out of the MIP (the MinIP keeps the whole
+  image) through the segmentation ContourLab already wrote for the series
+  (its RTSTRUCT or label map, read in memory, with a one‑voxel margin), so a
+  calcified vessel stays; without a segmentation that has bone, on a series with Hounsfield
+  units, a 700 HU density threshold is the fallback, and a calcified vessel
+  or one closer than 2 mm to bone (in the carotid canal, in the transverse
+  foramen) goes with it. The screen says which of the two was used, and a
+  projection that fails says why; showing the bone gives it back.
 
-The 3D view is drawn in WebGL, written for this module; where WebGL is
-missing, it falls back to a point cloud on a 2D canvas.
+The 3D view is drawn in WebGL, written for this module and shared with
+Nidus RT (`radai_recon3d_gl`); where WebGL is missing, it falls back to a
+point cloud on a 2D canvas. It has *See‑through* (bone and skin turn nearly
+transparent, and back), LAO/RAO and CRA/CAU bars and eight projections by
+button, in the C‑arm convention of Nidus RT: LAO puts the detector on the
+patient's left.
 
 **The only export is a video of the viewer** (MP4 or WebM). Each recording is
 a declared act — the person ticks a statement that the video is patient data
@@ -58,8 +71,9 @@ screen says so beside the statement.
   export button is a statement of intended use — and intended use defines a
   regulatory class. Inside the app, it is a study view. ContourLab's RTSTRUCT
   goes to the planning system as usual.
-- Its synthetic angiography is a projection of the image itself, with no
-  segmentation and no beams, and it shows no flow dynamics.
+- Its synthetic angiography is a projection of the image itself — the only
+  segmentation it uses is the bone ContourLab already drew, to take it out of
+  the MIP —, with no beams, and it shows no flow dynamics.
 
 ## What is ours, and what is not
 
@@ -85,7 +99,8 @@ lives in the [Suite][suite], and on the workstation the suite is one program:
 one process, one port, one `app` folder, assembled by the Suite's installer
 from the seven repositories. Its core module, `radai_recon3d` (the display
 windows, the MIP and MinIP projection and the PNG writer), is also used by the
-Suite's thumbnails and by the Nidus RT, Elastic RT and DicomBridge modules;
+Suite's thumbnails and by the Nidus RT, Elastic RT and DicomBridge modules,
+and the WebGL viewer, `radai_recon3d_gl`, also draws the 3D view of Nidus RT;
 the surface of each mesh is built by the 3D Printed Bolus module's code, the
 same surface as the bolus.
 
@@ -96,7 +111,8 @@ requirements and installation are in the Suite README.
 
 This repository has no build of its own. The Suite's packager
 (`build/empacotar_instalador.py --dos-repositorios`) downloads each component
-at the tag pinned in `build/componentes.lock.json`, checks its SHA‑256 and
+at the tag pinned in `build/componentes.lock.json`, checks the SHA‑256 of its
+extracted tree against the lock and
 assembles the installer — see *Build from source* in the Suite README.
 
 ## Running the batteries
@@ -130,6 +146,23 @@ none may be committed to it.**
    carries DICOM (with or without extension), a medical volume or a run
    log — and refuses it too when the scan cannot run, without the Suite
    beside this folder or without Python.
+
+## Reporting a problem
+
+A problem that is not a vulnerability goes through
+**[radioterapia.ai](https://radioterapia.ai)**. Include the Local Suite
+version, the Windows version, the screen language and the step that
+failed — and **never patient data**: no DICOM series, no screenshot of a
+patient image, no log with a patient ID, a UID or a series path. A problem
+reproduced with the synthetic phantoms of the batteries is the quickest to
+fix.
+
+## Security
+
+Found something that exposes patient data or lets the program act where it
+should not? **Do not report it in public.** Use GitHub's private
+vulnerability reporting on this repository, described in
+[SECURITY.md](SECURITY.md).
 
 ## Licence and name
 

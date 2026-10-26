@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import json
 import threading
 import time
+from collections import OrderedDict
 
 import radai_menu
 import radai_web
@@ -14,11 +16,31 @@ JANELAS = ((u"angio", u"angio"), (u"vaso_fino", u"vaso fino"),
 OSSO_HU = 700.0
 OSSO_MIN_CM3 = 2.0
 OSSO_MARGEM_MM = 2.0
-OSSO_E_O_VASO = (u"Sem o osso, o vaso a menos de 2 mm dele — no canal carotídeo, "
-                 u"no forame transverso — sai junto; «mostrar o osso» o devolve.")
+OSSO_E_O_VASO = (u"Pela segmentação do ContourLab sai só o osso, com um voxel de "
+                 u"margem. Sem ela, o limiar de 700 HU leva junto o vaso "
+                 u"calcificado e o vaso a menos de 2 mm do osso — no canal "
+                 u"carotídeo, no forame transverso; «mostrar o osso» devolve "
+                 u"tudo.")
+OSSO_PELA_SEGMENTACAO = (u"O osso sai pela segmentação do ContourLab desta "
+                         u"série, com um voxel de margem: o vaso calcificado "
+                         u"fica na projeção.")
+OSSO_PELO_LIMIAR = (u"Esta série não tem segmentação do ContourLab com osso: "
+                    u"o osso sai pelo limiar de 700 HU, que leva junto o vaso "
+                    u"calcificado e o vaso a menos de 2 mm do osso. Segmente "
+                    u"a série pelo «Rodar agora» para o osso sair pela "
+                    u"segmentação.")
+OSSO_FICA = (u"Esta série não tem segmentação do ContourLab com osso, e sem "
+             u"HU não há limiar que o separe: o osso fica na projeção.")
+FORA_DA_LISTA = u"recarregue a lista de séries"
+PROJECAO_FALHOU = (u"não consegui projetar esta série: a causa foi escrita no "
+                   u"log da estação")
+NAO_RESPONDEU = u"O app não respondeu."
+MODOS_DO_OSSO = (u"segmentacao", u"limiar", u"fica")
 
 _ABERTA = {"chave": None, "serie": None, "visto": 0.0, "relogio": None}
 _TRAVA = threading.Lock()
+_FALHAS = OrderedDict()
+_TRAVA_FALHAS = threading.Lock()
 
 
 def _soltar_se_ociosa():
@@ -64,9 +86,36 @@ def serie(b):
             mod = u""
         s = N.abrir(img, mod or None)
         s.sem_osso = None
+        ler_osso(s, pasta, uid or u"", bilhete=b)
         _ABERTA.update({"chave": chave, "serie": s, "visto": time.time()})
         _armar(SOLTAR_APOS_S)
         return s
+
+
+def ler_osso(s, pasta, uid, bilhete=u""):
+    s.osso_fonte = u""
+    try:
+        import radai_nidus_screen as NS
+        m, info = NS.osso_da_segmentacao(s, pasta, uid)
+        if m is not None and s.tirar_osso(m, info):
+            s.osso_fonte = str((info or {}).get("fonte") or u"")
+    except Exception as e:
+        s.osso = None
+        try:
+            import radai_thumbnail
+            radai_thumbnail.registrar_falha(u"reconstrucoes 3D, vascular, osso",
+                                            e, bilhete=bilhete)
+        except Exception:
+            pass
+    return modo_do_osso(s)
+
+
+def modo_do_osso(s):
+    if getattr(s, "osso", None) is not None:
+        return MODOS_DO_OSSO[0]
+    if s.escala.get("hu", True):
+        return MODOS_DO_OSSO[1]
+    return MODOS_DO_OSSO[2]
 
 
 def retirar_osso(img, fundo=None):
@@ -86,8 +135,13 @@ def retirar_osso(img, fundo=None):
     return sitk.Mask(img, m == 0, outsideValue=fundo)
 
 
-def volume_da_projecao(s, com_osso=False):
-    if com_osso or not s.escala.get("hu", True):
+def volume_da_projecao(s, com_osso=False, modo="mip"):
+    # GUARDA: o osso so sai no MIP; no MinIP o valor que o apaga viraria buraco escuro.
+    if com_osso or modo != u"mip":
+        return s.img
+    if modo_do_osso(s) == MODOS_DO_OSSO[0]:
+        return s.base(u"mip", True)
+    if modo_do_osso(s) == MODOS_DO_OSSO[2]:
         return s.img
     if getattr(s, "sem_osso", None) is None:
         s.sem_osso = retirar_osso(s.img, s.escala.get("min"))
@@ -106,7 +160,7 @@ def projecao_png(b, lao=0.0, cra=0.0, modo="mip", janela="angio", lado=512,
         lado = N.LADO_PADRAO
     modo = u"minip" if str(modo) == u"minip" else u"mip"
     janela = janela if janela in dict(JANELAS) else u"angio"
-    plano, info = N.projetar(volume_da_projecao(s, com_osso), float(lao), float(cra), modo, janela,
+    plano, info = N.projetar(volume_da_projecao(s, com_osso, modo), float(lao), float(cra), modo, janela,
                              lado=lado, laje_mm=(float(laje) or None),
                              escala=s.escala)
     c, l = info["centro"], info["largura"]
@@ -117,8 +171,9 @@ def projecao_png(b, lao=0.0, cra=0.0, modo="mip", janela="angio", lado=512,
 
 def _ajuda():
     import radai_nidus as N
-    return (u"A angiografia sintética projeta a própria imagem, sem "
-            u"segmentação e sem feixes.",
+    return (u"A angiografia sintética projeta a própria imagem e não precisa "
+            u"de segmentação; quando a série tem a do ContourLab, o osso sai "
+            u"por ela.",
             N.LIMITACAO_CLINICA, N.LIMITACAO_RM)
 
 
@@ -146,11 +201,53 @@ CSS = u"""
  background:var(--panel);color:var(--text-muted);cursor:pointer;font-family:var(--mono)}
 .vx-zoom button:hover,.vx-zoom button:focus-visible{color:var(--text);border-color:var(--mod-recon);outline:none}
 .vx-info{font-family:var(--mono);font-size:10.5px;color:var(--text-dim);margin:0}
+.vx-osso{display:flex;gap:8px;align-items:flex-start;margin:0;font-size:11.5px;
+ line-height:1.5;color:var(--text-muted)}
+.vx-osso:not([data-modo]){display:none}
+.vx-osso::before{content:"";width:7px;height:7px;border-radius:50%;flex:0 0 auto;
+ margin-top:5px;background:var(--aviso)}
+.vx-osso[data-modo="segmentacao"]::before{background:var(--ok)}
+.vx-osso code{font-family:var(--mono);font-size:10.5px;color:var(--text)}
+.vx-erro{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+ width:max-content;max-width:min(80%,440px);margin:0;padding:10px 14px;border-radius:8px;
+ background:rgba(0,0,0,.6);color:var(--img-texto);font-size:12.5px;line-height:1.5;
+ text-align:center}
+.vx-erro[hidden]{display:none}
 """
 
 JS = u"""
 var VX = {lao: 0, cra: 0, modo: 'mip', jan: 'angio', lado: 512, laje: 0, inv: false, osso: false,
-          zoom: 1, ux: 0, uy: 0, t: 0, pedido: 0};
+          zoom: 1, ux: 0, uy: 0, t: 0, pedido: 0, erro: false, osso_b: null};
+var VX_NAO_RESPONDEU = @NAO_RESPONDEU@;
+function vxErro(frase){
+ var e = r3El('vx_erro'); if(!e) return;
+ VX.erro = !!frase;
+ if(!frase){ e.hidden = true; e.textContent = ''; return }
+ if(window.uiTexto) uiTexto(e, frase); else e.textContent = frase;
+ e.hidden = false;
+}
+function vxOsso(modo, fonte){
+ var p = r3El('vx_osso'); if(!p) return;
+ if(!modo){ p.removeAttribute('data-modo'); return }
+ p.setAttribute('data-modo', modo);
+ Array.prototype.forEach.call(p.querySelectorAll('[data-vx-osso]'), function(s){
+  s.hidden = s.getAttribute('data-vx-osso') !== modo });
+ var f = r3El('vx_osso_fonte'); if(f) f.textContent = fonte || '';
+}
+function vxEstado(meu){
+ var b = R3.b;
+ fetch('/api/recon3d/vascular/estado?b=' + encodeURIComponent(b))
+  .then(function(r){ return r.json().catch(function(){ return {} }) })
+  .then(function(d){
+   if(meu !== VX.pedido || b !== R3.b) return;
+   if(d && d.osso){ vxErro(''); vxOsso(d.osso.modo, d.osso.fonte); VX.osso_b = b; return }
+   vxOsso(''); VX.osso_b = null;
+   vxErro((d && d.erro) || VX_NAO_RESPONDEU);
+  })
+  .catch(function(){
+   if(meu !== VX.pedido) return;
+   vxOsso(''); VX.osso_b = null; vxErro(VX_NAO_RESPONDEU) });
+}
 function vxUrl(lado){
  return '/api/recon3d/vascular/projecao?b=' + encodeURIComponent(R3.b)
   + '&lao=' + VX.lao + '&cra=' + VX.cra + '&modo=' + VX.modo + '&janela=' + VX.jan
@@ -162,11 +259,20 @@ function vxPintar(rapido){
  var img = r3El('vx_img'), cx = r3El('vx_proj'); if(!img) return;
  clearTimeout(VX.t);
  var meu = ++VX.pedido;
+ if(VX.osso_b !== R3.b) vxOsso('');
+ function apaga(){ if(window.uiCarregando) uiCarregando(cx, false) }
  function carrega(lado){
   if(window.uiCarregando && !rapido) uiCarregando(cx, true, 'projetando');
-  img.onload = function(){ if(meu === VX.pedido && window.uiCarregando) uiCarregando(cx, false) };
-  img.onerror = function(){ img.removeAttribute('src');
-   if(window.uiCarregando) uiCarregando(cx, false) };
+  img.onload = function(){
+   if(meu !== VX.pedido) return;
+   img.style.visibility = '';
+   apaga();
+   if(VX.erro || VX.osso_b !== R3.b) vxEstado(meu);
+  };
+  img.onerror = function(){
+   img.removeAttribute('src'); img.style.visibility = 'hidden'; apaga();
+   if(meu === VX.pedido) vxEstado(meu);
+  };
   img.src = vxUrl(lado);
  }
  if(rapido){ carrega(256); VX.t = setTimeout(function(){ rapido = false; carrega(VX.lado) }, 450) }
@@ -252,6 +358,7 @@ def _html_projecao():
     return (
         u'<div class="vx-palco"><div class="vx-proj" id="vx_proj">'
         u'<img id="vx_img" alt="" draggable="false">'
+        u'<p class="vx-erro" id="vx_erro" role="alert" hidden></p>'
         u'<span class="vx-zoom"><button type="button" onclick="vxZoom(1.25)" '
         u'aria-label="aproximar" title="aproximar">+</button>'
         u'<button type="button" onclick="vxZoom(0.8)" aria-label="afastar" '
@@ -278,6 +385,11 @@ def _html_projecao():
         u'</button><span class="ui-ajuda dir" id="vx_osso_aj" tabindex="0" '
         u'aria-label="ajuda">?<span class="ui-balao"><p data-radai-frase>%s</p>'
         u'</span></span></div>'
+        u'<p class="vx-osso" id="vx_osso" aria-live="polite">'
+        u'<span data-vx-osso="segmentacao" hidden><span data-radai-frase>%s'
+        u'</span> <code id="vx_osso_fonte" translate="no"></code></span>'
+        u'<span data-vx-osso="limiar" hidden data-radai-frase>%s</span>'
+        u'<span data-vx-osso="fica" hidden data-radai-frase>%s</span></p>'
         u'<label class="sub" for="vx_laje"><span data-radai-frase>laje</span> '
         u'· <span id="vx_lajev" data-radai-frase>todo o volume</span></label>'
         u'<input type="range" id="vx_laje" min="0" max="120" value="0"></div>'
@@ -285,7 +397,8 @@ def _html_projecao():
         u'janela</span></div><div class="vx-bts">%s</div></div>'
         u'<div class="vx-g"><div class="r3-ferr-cab"><span data-radai-frase>'
         u'resolução</span></div><div class="vx-bts">%s</div></div>'
-        u'</div></div>' % (inc, OSSO_E_O_VASO, jan, res))
+        u'</div></div>' % (inc, OSSO_E_O_VASO, OSSO_PELA_SEGMENTACAO,
+                           OSSO_PELO_LIMIAR, OSSO_FICA, jan, res))
 
 
 def pagina():
@@ -302,7 +415,9 @@ def pagina():
              + radai_ui.passo(u"3", u"Superfície dos vasos",
                               S.html_palco("vascular"), ident=u"vx_p3")
              + radai_ui.alerta(ALERTA))
-    js = (radai_viewer.JS_3D + S.JS_MALHA + S.JS_GRAVAR + S.JS_SERIE + JS)
+    js = (radai_viewer.JS_3D + S.JS_MALHA + S.JS_GRAVAR + S.JS_SERIE
+          + JS.replace(u"@NAO_RESPONDEU@",
+                       json.dumps(NAO_RESPONDEU, ensure_ascii=False)))
     return (u'<!doctype html><html><head><meta charset="utf-8">'
             u'<title>Vascular &middot; Reconstru&ccedil;&otilde;es 3D</title>'
             u'<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -311,8 +426,42 @@ def pagina():
             u'<script>%s</script></body></html>' % (S.CSS, CSS, corpo, js))
 
 
+def resposta_de_falha(e):
+    import radai_nidus as N
+    if isinstance(e, N.SerieRecusada):
+        return 422, {"erro": str(e)}
+    return 500, {"erro": PROJECAO_FALHOU, "tipo": type(e).__name__}
+
+
+def _lembrar_falha(b, falha):
+    with _TRAVA_FALHAS:
+        _FALHAS.pop(str(b or u""), None)
+        if falha is not None:
+            _FALHAS[str(b or u"")] = falha
+            while len(_FALHAS) > 16:
+                _FALHAS.popitem(last=False)
+
+
+def estado_da_projecao(b):
+    with _TRAVA_FALHAS:
+        falha = _FALHAS.get(str(b or u""))
+    if falha is not None:
+        return falha
+    try:
+        s = serie(b)
+    except Exception as e:
+        import radai_thumbnail
+        radai_thumbnail.registrar_falha(u"reconstrucoes 3D, vascular", e,
+                                        bilhete=b)
+        return resposta_de_falha(e)
+    if s is None:
+        return 404, {"erro": FORA_DA_LISTA}
+    return 200, {"osso": {"modo": modo_do_osso(s),
+                          "fonte": getattr(s, "osso_fonte", u"") or u""}}
+
+
 def montar(app):
-    from fastapi.responses import HTMLResponse, Response
+    from fastapi.responses import HTMLResponse, JSONResponse, Response
 
     @app.get("/recon3d/vascular", response_class=HTMLResponse)
     def _tela():
@@ -329,10 +478,21 @@ def montar(app):
             import radai_thumbnail
             radai_thumbnail.registrar_falha(u"reconstrucoes 3D, vascular", e,
                                             bilhete=b)
-            png = None
+            st, corpo = resposta_de_falha(e)
+            _lembrar_falha(b, (st, corpo))
+            return JSONResponse(status_code=st, content=corpo,
+                                headers={"Cache-Control": "no-store"})
         if png is None:
-            return Response(status_code=404, content=b"")
+            return JSONResponse(status_code=404, content={"erro": FORA_DA_LISTA},
+                                headers={"Cache-Control": "no-store"})
+        _lembrar_falha(b, None)
         return Response(content=png, media_type="image/png",
                         headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/recon3d/vascular/estado")
+    def _estado(b: str = ""):
+        st, corpo = estado_da_projecao(b)
+        return JSONResponse(status_code=st, content=corpo,
+                            headers={"Cache-Control": "no-store"})
 
     return app

@@ -472,8 +472,29 @@ def teste_a_vascular_projeta_e_inverte():
            a.shape == bi.shape and np.abs((255 - a) - bi).max() <= 1,
            (a.shape, bi.shape))
     checar(u"(isca) a normal não é igual à invertida", np.abs(a - bi).max() > 50)
+    import radai_recon3d_vascular as V
+
+    def morto_com_motivo(resp):
+        if resp.status_code != 404 or not resp.content:
+            return False
+        try:
+            return resp.json() == {"erro": V.FORA_DA_LISTA}
+        except ValueError:
+            return False
+
     rm = cli.get("/api/recon3d/vascular/projecao", params={"b": "morto"})
-    checar(u"bilhete morto é 404 vazio", rm.status_code == 404 and not rm.content)
+    checar(u"bilhete morto é 404 com o motivo em JSON", morto_com_motivo(rm),
+           (rm.status_code, rm.content[:120]))
+    from fastapi import FastAPI
+    from fastapi.responses import Response
+    from fastapi.testclient import TestClient
+    isca = FastAPI()
+
+    @isca.get("/vazio")
+    def _vazio():
+        return Response(status_code=404)
+    checar(u"(isca) o 404 vazio de antes não passa",
+           not morto_com_motivo(TestClient(isca).get("/vazio")))
 
 
 def _cranio_sintetico():
@@ -530,19 +551,25 @@ def teste_a_vascular_tira_a_calota():
     vistos = []
     orig = V.volume_da_projecao
 
-    def espia(s, com_osso=False):
-        vistos.append(com_osso)
-        return orig(s, com_osso)
+    def espia(s, com_osso=False, modo="mip"):
+        vistos.append((com_osso, modo))
+        return orig(s, com_osso, modo)
     V.volume_da_projecao = espia
     try:
         r0 = cli.get("/api/recon3d/vascular/projecao", params={"b": b, "lado": 256})
         r1 = cli.get("/api/recon3d/vascular/projecao",
                      params={"b": b, "lado": 256, "osso": 1})
+        r2 = cli.get("/api/recon3d/vascular/projecao",
+                     params={"b": b, "lado": 256, "modo": "minip"})
     finally:
         V.volume_da_projecao = orig
     checar(u"a rota tira o osso sem pedido e o devolve com osso=1",
            r0.status_code == 200 and r1.status_code == 200
-           and vistos == [False, True], (r0.status_code, r1.status_code, vistos))
+           and vistos[:2] == [(False, u"mip"), (True, u"mip")],
+           (r0.status_code, r1.status_code, vistos))
+    checar(u"  e passa o modo da projeção ao volume (o MinIP chega como MinIP)",
+           r2.status_code == 200 and vistos[2:] == [(False, u"minip")],
+           (r2.status_code, vistos))
 
 
 def _paginas():
@@ -942,15 +969,36 @@ EXTRA_JS = (
     u"Nenhuma série foi contornada nesta máquina ainda.",
     u"Nenhuma série desta estação rodou o protocolo Anatomia Torácica.",
     u"não consegui ler o acervo desta estação", u"não consegui listar esta pasta",
-    u"Nenhuma série nesta pasta.", u"escolha a pasta com as séries",
+    u"Nenhuma série nesta pasta.",
     u"a ficha venceu: escolha a série no acervo",
     u"a série não está mais nesta pasta", u"desenho do axial",
     u"este navegador não grava neste formato", u"não consegui montar o volume",
-    u"projetando", u"Parar e salvar", u"Iniciar gravação", u"carregando…",
+    u"projetando", u"Parar e salvar", u"Iniciar gravação",
     u"abrindo a série…", u"todo o volume")
 
 
 FRASES_QUE_ESPERAM_A_TRADUCAO = ()
+
+
+def _extra_fora_do_codigo(extra, paginas):
+    import glob
+    import html
+    import radai_ui
+    fontes = [html.unescape(p) for p in paginas.values()]
+    for arq in glob.glob(os.path.join(APP, "*.py")) + [radai_ui.__file__]:
+        fontes.append(io.open(arq, encoding="utf-8").read())
+    return sorted(f for f in extra if not any(f in t for t in fontes))
+
+
+def teste_o_extra_js_so_tem_frase_que_o_codigo_usa():
+    secao(u"toda frase do EXTRA_JS ainda mora no código das três telas")
+    pags = _paginas()
+    fora = _extra_fora_do_codigo(EXTRA_JS, pags)
+    checar(u"nenhuma frase do EXTRA_JS saiu do produto", not fora, fora)
+    isca = _extra_fora_do_codigo(
+        EXTRA_JS + (u"escolha a pasta com as séries", u"carregando…"), pags)
+    checar(u"isca: a frase que saiu das telas e ficou na lista é acusada",
+           isca == [u"carregando…", u"escolha a pasta com as séries"], isca)
 
 
 def teste_as_frases_novas_tem_os_doze_idiomas():
@@ -1031,6 +1079,7 @@ def main():
               teste_a_gravacao_do_visor,
               teste_a_gravacao_declara_e_registra_o_ato,
               teste_a_lista_filtra_e_liga,
+              teste_o_extra_js_so_tem_frase_que_o_codigo_usa,
               teste_as_frases_novas_tem_os_doze_idiomas]
     todos = set(k for k, v in globals().items()
                 if k.startswith("teste_") and callable(v))

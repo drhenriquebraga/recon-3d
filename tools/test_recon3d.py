@@ -270,6 +270,60 @@ def teste_a_escolha_da_serie_e_o_popup_da_casca():
            js.count("r3SemSerie()") >= 2)
 
 
+def _varrer_recon3d(S, pasta, uso=None):
+    import radai_varrer
+    d = radai_varrer.iniciar(uso or S.USO_DA_VARREDURA, pasta, dias=0,
+                             em_segundo_plano=False)
+    return dict((str(x.get("pid")), x) for x in d.get("linhas") or ()), d
+
+
+def _a_pasta_lista_pela_varredura_da_casca(S):
+    from datetime import datetime
+    from fastapi import FastAPI
+    import make_test_series
+    import radai_thumbnail
+    import radai_varrer
+    app = FastAPI()
+    S.montar(app)
+    rotas = set(getattr(r, "path", "") for r in app.routes)
+    checar("a rota do POST unico saiu da montagem, e o uso da varredura entrou",
+           "/api/recon3d/series" not in rotas
+           and radai_varrer.uso(S.USO_DA_VARREDURA) is not None,
+           str(sorted(x for x in rotas if x.startswith("/api/recon3d"))))
+    base = tempfile.mkdtemp(prefix="r3d_varrer_")
+    try:
+        p_seg = os.path.join(base, "PAC_SEG", "CT")
+        uid_seg = make_test_series.escreve_serie(p_seg, "PAC_SEG",
+                                                 datetime.now(), 6)
+        io.open(os.path.join(p_seg, "RS_RadAI_20261025_%s.dcm"
+                             % uid_seg[-8:]), "wb").close()
+        make_test_series.escreve_serie(os.path.join(base, "PAC_SEM", "CT"),
+                                       "PAC_SEM", datetime.now(), 6)
+        make_test_series.escreve_serie(os.path.join(base, "PAC_UM", "CT"),
+                                       "PAC_UM", datetime.now(), 1)
+        por, d = _varrer_recon3d(S, base)
+        checar("a varredura da casca acha as series da pasta (a de 1 corte "
+               "fica de fora)", sorted(por) == ["PAC_SEG", "PAC_SEM"]
+               and not d.get("erro"), "%s %s" % (sorted(por), d.get("erro")))
+        seg, sem = por.get("PAC_SEG") or {}, por.get("PAC_SEM") or {}
+        checar("  cada linha diz se a serie esta segmentada (o RS_RadAI_ dela "
+               "ao lado)", seg.get("segmentada") is True
+               and sem.get("segmentada") is False
+               and seg.get("estudo_3d") == [], "%s %s" % (
+                   seg.get("segmentada"), sem.get("segmentada")))
+        pasta_b, uid_b = radai_thumbnail.resolver(seg.get("bilhete") or "")
+        checar("  e o bilhete da linha abre a serie certa",
+               bool(pasta_b) and uid_b == uid_seg, str(uid_b)[-8:])
+        radai_varrer.registrar_series_de_pasta("recon3d_isca")
+        por_i, _d = _varrer_recon3d(S, base, uso="recon3d_isca")
+        checar("  (isca) sem o enriquecer da tela, a linha nao diz segmentada "
+               "e a de 1 corte entra",
+               "segmentada" not in (por_i.get("PAC_SEG") or {})
+               and "PAC_UM" in por_i, str(sorted(por_i)))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def teste_a_serie_vem_de_uma_lista():
     secao("a serie vem de uma lista, e a lista vem de quem ja a tinha")
     import radai_recon3d_screen as S
@@ -285,17 +339,28 @@ def teste_a_serie_vem_de_uma_lista():
            "url: '/api/recon3d/acervo?ferramenta='" in S.JS_SERIE)
     checar("e as linhas sao as da tabela da Suite (`radai_tabela_acervo.linhas`)",
            "radai_tabela_acervo.linhas(" in fonte)
-    checar("a pasta lista pela varredura da Suite, e nao pela do «Rodar agora»",
-           "radai_dicom.buscar_series(" in fonte and "radai_batch" not in fonte
-           and "todas: true" in S.JS_SERIE)
+    listar = _funcao_js(S.JS_SERIE, "r3Listar")
+    checar("a pasta lista pela varredura da casca em segundo plano, "
+           "e nao por um POST unico",
+           "window.uiVarrerLista({" in listar and "r3Post(" not in listar
+           and "/api/recon3d/series" not in fonte
+           and "radai_varrer.registrar_series_de_pasta(" in fonte
+           and ("var R3_USO_DA_VARREDURA = '%s';" % S.USO_DA_VARREDURA)
+           in S.JS_SERIE and "uso: R3_USO_DA_VARREDURA" in listar, listar[:200])
+    checar("  com o filtro de data e a linha de estado da casca",
+           "dias: 'r3_dias'" in listar and "estado: 'r3_busca'" in listar
+           and 'id="r3_dias"' in p and 'id="r3_busca"' in p)
+    checar("  e a estrela da pasta favorita ao lado do campo",
+           'data-ui-fav="r3_pasta"' in p)
     checar("e NAO reimplementa a busca por RTSTRUCT",
-           "_rs_existente" not in fonte)
+           "_rs_existente" not in fonte and "radai_batch" not in fonte)
     checar("o campo de caminho continua, na aba «Aponte uma pasta»",
            'id="r3_pasta"' in p)
     checar("e «Procurar» abre o explorador de pastas",
            "uiExplorador({" in S.JS_SERIE)
-    checar("sem pasta, a rota usa o ROOT configurado",
-           "radai_config.root_configurado()" in fonte)
+    checar("sem pasta, nada e varrido (o campo treme), e o ROOT nao e lido",
+           "uiTremer" in listar and "root_configurado" not in fonte)
+    _a_pasta_lista_pela_varredura_da_casca(S)
     abrir = _funcao_js(S.JS_SERIE, "r3Abrir")
     checar("abrir a serie e pedir o estado pelo bilhete, nunca pelo caminho",
            "encodeURIComponent(b)" in abrir and "pasta" not in abrir,
@@ -1363,10 +1428,13 @@ def _rtstruct_sintetico(caminho, estruturas):
     ds.Modality = "RTSTRUCT"
     ds.StructureSetLabel = "RadAI_OAR"
     ss, rc = [], []
-    for i, (nome, cor, conts) in enumerate(estruturas, 1):
+    for i, est in enumerate(estruturas, 1):
+        nome, cor, conts = est[:3]
         s = Dataset()
         s.ROINumber = i
         s.ROIName = nome
+        if len(est) > 3 and est[3]:
+            s.ROIDescription = est[3]
         ss.append(s)
         r = Dataset()
         r.ReferencedROINumber = i
@@ -1386,6 +1454,145 @@ def _rtstruct_sintetico(caminho, estruturas):
         ds.save_as(caminho, enforce_file_format=True)
     except TypeError:
         ds.save_as(caminho, write_like_original=False)
+
+
+def _esfera_no_plano(centro, R, linha, coluna, passo=3.0, n=64):
+    import numpy as np
+    linha = np.asarray(linha, dtype=float)
+    coluna = np.asarray(coluna, dtype=float)
+    normal = np.cross(linha, coluna)
+    a = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    fora = []
+    for w in np.arange(-R, R + 1e-6, passo):
+        r2 = R * R - w * w
+        if r2 > 4.0:
+            r = np.sqrt(r2)
+            fora.append(np.asarray(centro, dtype=float) + w * normal
+                        + np.outer(r * np.cos(a), linha)
+                        + np.outer(r * np.sin(a), coluna))
+    return fora
+
+
+def teste_o_nome_proprio_decide_pelo_nome_padrao():
+    secao("STUDY com nome proprio: osso, vaso, pele e opacidade pelo nome "
+          "padrao da descricao da ROI")
+    import radai_recon3d as R
+    import radai_sets
+    esfera = _esfera_no_plano((0.0, 0.0, 0.0), 10.0, (1, 0, 0), (0, 1, 0))
+    d = radai_sets.descricao_da_roi
+    base = tempfile.mkdtemp(prefix="r3d_proprio_")
+    try:
+        rs = os.path.join(base, "RS_proprio.dcm")
+        _rtstruct_sintetico(rs, [
+            (u"CRANIO", (200, 200, 200), esfera, d(u"Skull_ai")),
+            (u"ACI_E", (220, 40, 40), esfera, d(u"A_Carotid_L_ai")),
+            (u"TEGUMENTO", (240, 200, 180), esfera, d(u"Skin_ai")),
+            (u"SEM_DESC", (100, 100, 100), esfera)])
+        por = dict((r[u"nome"], r) for r in R.abrir_conjunto(rs)[u"rois"])
+        checar("o nome padrao sai da descricao da ROI, e sem descricao fica "
+               "o proprio nome",
+               por[u"CRANIO"].get(u"padrao") == u"Skull_ai"
+               and por[u"ACI_E"].get(u"padrao") == u"A_Carotid_L_ai"
+               and por[u"SEM_DESC"].get(u"padrao") == u"SEM_DESC",
+               str(dict((k, v.get(u"padrao")) for k, v in por.items())))
+        checar("CRANIO e osso; ACI_E e vaso, e nao osso",
+               R.e_osso(por[u"CRANIO"][u"padrao"])
+               and R.e_vaso(por[u"ACI_E"][u"padrao"])
+               and not R.e_osso(por[u"ACI_E"][u"padrao"]))
+        checar("TEGUMENTO sai so pela face de fora e com a opacidade da pele",
+               por[u"TEGUMENTO"].get(u"casca") is True
+               and por[u"TEGUMENTO"][u"opacidade"]
+               == R.opacidade_inicial(u"Skin_ai"),
+               str(por[u"TEGUMENTO"]))
+        checar("isca: so pelo nome proprio, CRANIO nao seria osso, ACI_E nao "
+               "seria vaso, e TEGUMENTO seria opaco e cheio",
+               not R.e_osso(u"CRANIO") and not R.e_vaso(u"ACI_E")
+               and not R.e_casca(u"TEGUMENTO")
+               and R.opacidade_inicial(u"TEGUMENTO")
+               != R.opacidade_inicial(u"Skin_ai"))
+        tela = io.open(_componentes.fonte("app/radai_recon3d_screen.py"),
+                       encoding="utf-8").read()
+        checar("a lista de estruturas da tela marca osso e vaso pelo nome "
+               "padrao", u'R.e_osso(r.get("padrao") or r["nome"])' in tela
+               and u'R.e_vaso(r.get("padrao") or r["nome"])' in tela
+               and u'R.e_osso(r["nome"])' not in tela)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def teste_o_rtstruct_fora_do_axial_vira_malha():
+    secao("o RTSTRUCT de serie sagital, coronal ou obliqua (a RM) vira malha "
+          "no lugar")
+    import math
+    import numpy as np
+    import radai_recon3d as R
+    c = math.cos(math.radians(9.0))
+    s = math.sin(math.radians(9.0))
+    planos = [("axial", (1, 0, 0), (0, 1, 0)),
+              ("sagital", (0, 1, 0), (0, 0, -1)),
+              ("coronal", (1, 0, 0), (0, 0, -1)),
+              ("axial obliqua", (1, 0, 0), (0, c, s)),
+              ("sagital obliqua", (s, c, 0), (0, 0, -1))]
+    centro, raio = (12.0, -25.0, 40.0), 22.0
+    alvo = 4.0 / 3.0 * math.pi * raio ** 3
+    base = tempfile.mkdtemp(prefix="r3d_plano_")
+    try:
+        for rotulo, linha, coluna in planos:
+            rs = os.path.join(base, "RS_%s.dcm" % rotulo.replace(" ", "_"))
+            _rtstruct_sintetico(rs, [(u"Esfera_ai", (220, 60, 60),
+                                      _esfera_no_plano(centro, raio, linha,
+                                                       coluna))])
+            conj = R.abrir_conjunto(rs)
+            v, f, _info = R.malha_do_conjunto(conj, u"Esfera_ai")
+            m = _malha_conferida(v, f)
+            meio = (v.min(axis=0) + v.max(axis=0)) / 2.0 if len(v) else None
+            checar("%s: a malha fecha, com o volume da esfera a 6%%" % rotulo,
+                   m["fechada"] and abs(m["volume_mm3"] - alvo) / alvo < 0.06,
+                   "%s %.0f contra %.0f" % (m["fechada"], m["volume_mm3"],
+                                            alvo))
+            checar("%s:   e no lugar dos contornos, em mm LPS (centro a "
+                   "1,5 mm)" % rotulo, meio is not None
+                   and float(np.abs(meio - centro).max()) < 1.5,
+                   str(None if meio is None else np.round(meio, 2)))
+            nuvem = R.nuvem_do_conjunto(conj, u"Esfera_ai")
+            p = np.asarray(nuvem.get(u"pontos") or [[1e9, 1e9, 1e9]])
+            dist = np.linalg.norm(p - centro, axis=1)
+            checar("%s:   e a nuvem de pontos na superficie dela (raio "
+                   "mediano a 1,5 mm)" % rotulo,
+                   abs(float(np.median(dist)) - raio) < 1.5,
+                   "%.2f mm" % float(np.median(dist)))
+        rng = np.random.RandomState(7)
+        tortos = []
+        for p in _esfera_no_plano(centro, raio, (0, 1, 0), (0, 0, -1)):
+            q = p.copy()
+            q[:, 0] += rng.uniform(-1.0, 1.0, len(q))
+            tortos.append(q)
+        rs_t = os.path.join(base, "RS_sagital_fora_do_plano.dcm")
+        _rtstruct_sintetico(rs_t, [(u"Esfera_ai", (220, 60, 60), tortos)])
+        v, f, _info = R.malha_do_conjunto(R.abrir_conjunto(rs_t), u"Esfera_ai")
+        m = _malha_conferida(v, f)
+        checar("o RTSTRUCT de antes (pontos ate 1 mm fora do corte) tambem vira "
+               "malha: cada contorno vai ao plano dele (volume a 8%)",
+               m["fechada"] and abs(m["volume_mm3"] - alvo) / alvo < 0.08,
+               "%s %.0f contra %.0f" % (m["fechada"], m["volume_mm3"], alvo))
+        axial = {u"Esfera_ai": _esfera(10.0, -20.0, 30.0, 24.0)}
+        checar("contorno axial nao gira (o caminho de sempre)",
+               R.plano_dos_contornos(axial) is None)
+        rs = os.path.join(base, "RS_sagital.dcm")
+        guardado = R.plano_dos_contornos
+        R.plano_dos_contornos = lambda *a, **k: None
+        try:
+            try:
+                R.malha_do_conjunto(R.abrir_conjunto(rs), u"Esfera_ai")
+                recusou = False
+            except ValueError:
+                recusou = True
+        finally:
+            R.plano_dos_contornos = guardado
+        checar("ISCA: empilhando pela posicao z do paciente, como antes, a "
+               "sagital nao vira malha", recusou)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def _serie_com_rtstruct(base):
@@ -1751,7 +1958,7 @@ function GLFalso(){
  g.getExtension = function(){ return {} };
  g.getAttribLocation = function(){ return 0 }; g.getUniformLocation = function(p, n){ return n };
  g.viewport = g.clearColor = g.clear = g.useProgram = g.enableVertexAttribArray =
-  g.uniformMatrix3fv = g.uniform3f = g.uniform2f = g.bindBuffer =
+  g.uniformMatrix3fv = g.uniformMatrix4fv = g.uniform3f = g.uniform2f = g.bindBuffer =
   g.vertexAttribPointer = g.depthFunc = g.blendFunc = function(){};
  g.uniform1f = function(n, v){ if(n === 'uAlfa') g.alfa = v };
  g.enable = function(x){ LOG.push('on:' + (nomes[x] || x)) };
@@ -1862,6 +2069,106 @@ console.log('JSON:' + JSON.stringify(LOG));
     d2 = [x for x in (log2 or []) if x.startswith("draw:")]
     checar("(isca) com a ordem invertida, a da frente sairia primeiro",
            d2[2:3] == ["draw:0.3"], str(d2))
+
+
+def teste_o_visor_e_um_so_com_o_nidus():
+    secao("o visor WebGL mora num modulo so do RECON_3D, e as duas telas o usam")
+    import radai_recon3d_gl as G
+    import radai_recon3d_screen as S
+    for fn in ("r3gLerStl", "r3gPrograma", "r3gSubirEm", "r3gUmEm", "r3gOrto",
+               "r3gCorte", "r3gTranslucidoEm"):
+        checar("o modulo do visor tem %s" % fn, ("function %s(" % fn) in G.JS)
+    checar("o sombreador recorta pela caixa no espaco da serie (uParaCaixa)",
+           "uParaCaixa" in G.JS and "discard" in G.JS)
+    checar("a tela das Reconstrucoes usa o modulo, sem copia do leitor de STL",
+           S.JS_MALHA.startswith(G.JS)
+           and S.JS_MALHA.count("function r3gLerStl(") == 1)
+    try:
+        import radai_nidus_screen as NS
+        checar("o Nidus importa o mesmo modulo", G.JS in NS.pagina())
+    except Exception as e:
+        checar("o Nidus importa o mesmo modulo", False, str(e)[:80])
+
+
+def teste_o_visor_3d_herda_do_nidus():
+    secao("o visor 3D herda do Nidus: Ver atraves, as barras e as incidencias")
+    import radai_nidus as N
+    import radai_recon3d_screen as S
+    p = S.pagina("geral")
+    checar("o botao «Ver atraves» esta no visor", 'id="r3_atraves"' in p
+           and ">Ver através</span>" in p)
+    checar("as barras LAO/RAO (-180 a 180) e CRA/CAU (-90 a 90)",
+           'id="r3_lao" min="-180" max="180"' in p
+           and 'id="r3_cra" min="-90" max="90"' in p)
+    faltam = [n for n, a, b in N.INCIDENCIAS
+              if ('data-lao="%d" data-cra="%d"' % (a, b)) not in p
+              or (">%s</small>" % N.rotulo_do_angulo(a, b)) not in p]
+    checar("as oito incidencias do Nidus, com o angulo no botao", not faltam,
+           str(faltam))
+    checar("e a convencao vem do radai_nidus (uma funcao so)",
+           "function radaiIncidencia(" in p
+           and "function radaiIncidencia(" not in S.JS_MALHA)
+    js = (u"document.querySelectorAll = function(){ return [] };\n"
+          + N.JS_CONVENCAO + S.JS_MALHA)
+    prog = u"\n".join([_dom_falso(), _gl_falso(),
+                       u"var CTX = function(){ return GLFalso() };", js, u"""
+EL.r3_lao = {value: '0'}; EL.r3_cra = {value: '0'};
+EL.r3_lao_v = {textContent: ''}; EL.r3_cra_v = {textContent: ''};
+EL.r3_atraves = {setAttribute: function(k, v){ this[k] = v }};
+function r3MenosMovimento(){ return true }
+r3mIniciar();
+var r = {};
+r3IncAplicar(90, 0, true);
+var b = radaiIncidencia(90, 0), M = R3G.M;
+r.linhas = [M[0]-b.r[0], M[1]-b.r[1], M[2]-b.r[2], M[3]-b.u[0], M[4]-b.u[1], M[5]-b.u[2],
+            M[6]-b.d[0], M[7]-b.d[1], M[8]-b.d[2]].map(Math.abs).reduce(function(a, x){ return Math.max(a, x) }, 0);
+r.rot = [EL.r3_lao_v.textContent, EL.r3_cra_v.textContent];
+EL.r3_lao.value = '-35'; EL.r3_cra.value = '20'; r3IncBarra();
+r.de = r3IncDe(R3G.M);
+R3G.M = n3Girar(R3G.M, 0, 0); R3M.incVisto = ''; r3IncSincronizar();
+r.sinc = [EL.r3_lao.value, EL.r3_cra.value];
+R3M.estr = [{nome: 'Skull_ai', osso: true, cor: [230, 220, 200]},
+            {nome: 'Skin_ai', casca: true, cor: [200, 160, 140]},
+            {nome: 'Brain_ai', cor: [200, 120, 120]}];
+R3M.cam = [{camada: 'osso', cor: [230, 220, 200]}, {camada: 'pele', cor: [200, 160, 140]}];
+R3M.alfa = {Skull_ai: 1, Skin_ai: 0.15, Brain_ai: 1, '@osso': 1, '@pele': 0.15};
+r3Atraves();
+r.atraves = JSON.parse(JSON.stringify(R3M.alfa));
+r.botao = EL.r3_atraves['aria-pressed'];
+r3Atraves();
+r.volta = JSON.parse(JSON.stringify(R3M.alfa));
+console.log('JSON:' + JSON.stringify(r));
+"""])
+
+    def rodar(fonte):
+        return _rodar_js(fonte)
+    d, erro = rodar(prog)
+    if d is None:
+        checar("as barras e o Ver atraves executam no node", False, erro)
+        return
+    checar("a incidencia vira a camera: as linhas de M sao r, u e d da convencao",
+           d["linhas"] < 1e-9, str(d["linhas"]))
+    checar("  e a leitura diz LAO 90° · CRA 0°", d["rot"] == [u"LAO 90°", u"CRA 0°"],
+           str(d["rot"]))
+    checar("as barras giram o 3D e a leitura volta da camera (RAO 35, CRA 20)",
+           d["de"] == [-35, 20] and d["sinc"] == [u"-35", u"20"], str(d))
+    a, v = d["atraves"], d["volta"]
+    checar("«Ver atraves» poe osso e pele em alfa baixo, e o resto fica",
+           a["Skull_ai"] == 0.1 and a["@osso"] == 0.1 and a["Skin_ai"] == 0.03
+           and a["@pele"] == 0.03 and a["Brain_ai"] == 1, str(a))
+    checar("  e diz que esta ligado", d["botao"] == u"true")
+    checar("desligar devolve a opacidade de antes",
+           v == {u"Skull_ai": 1, u"Skin_ai": 0.15, u"Brain_ai": 1, u"@osso": 1,
+                 u"@pele": 0.15}, str(v))
+    isca = prog.replace("R3M.atravesAntes[k] = R3M.alfa[k];", "")
+    d2, _e = rodar(isca)
+    checar("  isca: sem guardar a opacidade, desligar nao a devolve",
+           d2 is not None and d2["volta"].get("Skull_ai") != 1, str(d2))
+    isca2 = prog.replace("return [b.r[0], b.r[1], b.r[2], b.u[0], b.u[1], b.u[2], b.d[0], b.d[1], b.d[2]];",
+                         "return [b.r[0], b.r[1], b.r[2], b.u[0], b.u[1], b.u[2], b.v[0], b.v[1], b.v[2]];")
+    d3, _e = rodar(isca2)
+    checar("  isca: a camera olhando do lado do tubo e acusada",
+           isca2 != prog and d3 is not None and d3["linhas"] > 0.5, str(d3))
 
 
 def teste_o_cartao_do_modulo_navega():
@@ -2156,6 +2463,342 @@ def teste_a_leitura_sem_uid_saiu():
     shutil.rmtree(base, ignore_errors=True)
 
 
+def _cranio_vascular():
+    import numpy as np
+    import SimpleITK as sitk
+    forma = (60, 90, 90)
+    z, y, x = np.indices(forma).astype(np.float64)
+    r = np.sqrt((y - 45.0) ** 2 + (x - 45.0) ** 2)
+    a = np.full(forma, -1000, np.int16)
+    a[r < 34] = 40
+    casca = (r >= 30) & (r < 34)
+    a[casca] = 1200
+    junto = (y - 45.0) ** 2 + (x - 72.0) ** 2 <= 1.5 ** 2
+    a[junto] = 350
+    calcificado = (y - 45.0) ** 2 + (x - 30.0) ** 2 <= 3.5 ** 2
+    a[calcificado] = 900
+    img = sitk.GetImageFromArray(a)
+    img.SetSpacing((1.0, 1.0, 1.0))
+    return img, casca, junto, calcificado
+
+
+def teste_o_vascular_tira_o_osso_pela_segmentacao():
+    secao("o Vascular tira o osso pela segmentacao do ContourLab, e o limiar so como recuo")
+    import numpy as np
+    import SimpleITK as sitk
+    import radai_nidus as N
+    import radai_nidus_screen as NS
+    import radai_rotulos
+    import radai_thumbnail
+    import radai_recon3d_vascular as V
+    img, casca, junto, calcificado = _cranio_vascular()
+    uid = u"1.2.826.0.1.3680043.8.498.77665544"
+    base = tempfile.mkdtemp(prefix="r3d_vasc_")
+    try:
+        mapa = os.path.join(base, "mapa")
+        os.makedirs(mapa)
+        radai_rotulos.gravar(mapa, uid, {"total": {
+            "skull": casca, "common_carotid_artery_left": junto}}, ref=img)
+        s = N.abrir(img, "CT")
+        modo = V.ler_osso(s, mapa, uid)
+        vol = sitk.GetArrayFromImage(V.volume_da_projecao(s, com_osso=False))
+        fundo = s.escala["min"]
+        checar("com a segmentacao, o osso sai por ela e a tela sabe de onde",
+               modo == "segmentacao" and V.modo_do_osso(s) == "segmentacao"
+               and bool(s.osso_fonte), (modo, s.osso_fonte))
+        checar("  a calota sai inteira (vira o fundo da serie)",
+               bool((vol[casca] == fundo).all()), int((vol[casca] != fundo).sum()))
+        checar("  o vaso calcificado (900 HU, maior que 2 cm3) fica, valor a valor",
+               bool((vol[calcificado] == 900).all()),
+               int((vol[calcificado] != 900).sum()))
+        checar("  o vaso a 1,5 mm do osso fica (a margem e de um voxel, e o vaso "
+               "que o mapa nomeia nunca entra no osso)",
+               bool((vol[junto] == 350).all()), int((vol[junto] != 350).sum()))
+        checar("  «mostrar o osso» devolve a imagem inteira",
+               V.volume_da_projecao(s, com_osso=True) is s.img)
+        s2 = N.abrir(img, "CT")
+        vazio = os.path.join(base, "vazio")
+        os.makedirs(vazio)
+        modo2 = V.ler_osso(s2, vazio, uid)
+        vol2 = sitk.GetArrayFromImage(V.volume_da_projecao(s2, com_osso=False))
+        checar("sem segmentacao, o recuo e o limiar, e a tela e avisada (limiar)",
+               modo2 == "limiar" and not s2.osso_fonte, modo2)
+        checar("  (isca) o limiar apaga o vaso calcificado inteiro",
+               bool((vol2[calcificado] != 900).all()),
+               int((vol2[calcificado] == 900).sum()))
+        checar("  (isca) e leva junto o vaso a menos de 2 mm do osso",
+               bool((vol2[junto] != 350).any()), int((vol2[junto] != 350).sum()))
+        checar("  o recuo ainda tira a calota",
+               bool((vol2[casca] <= -1000).all()))
+        rm = N.abrir(img, "MR")
+        checar("RM sem segmentacao: o osso fica, e a tela diz por que",
+               V.ler_osso(rm, vazio, uid) == "fica"
+               and V.volume_da_projecao(rm, com_osso=False) is rm.img)
+        rm2 = N.abrir(img, "MR")
+        checar("RM com a segmentacao: o osso sai por ela",
+               V.ler_osso(rm2, mapa, uid) == "segmentacao"
+               and V.volume_da_projecao(rm2, com_osso=False) is not rm2.img)
+        orig, linhas = NS.osso_da_segmentacao, []
+        log0 = radai_thumbnail._log_da_estacao
+        radai_thumbnail._JA_REGISTRADAS.clear()
+
+        def _explode(*a, **k):
+            raise IOError(u"Sem DICOM em \\\\servidor\\%s" % PACIENTE_COM_ESPACO)
+        try:
+            NS.osso_da_segmentacao = _explode
+            radai_thumbnail._log_da_estacao = lambda: linhas.append
+            s3 = N.abrir(img, "CT")
+            modo3 = V.ler_osso(s3, mapa, uid)
+        finally:
+            NS.osso_da_segmentacao = orig
+            radai_thumbnail._log_da_estacao = log0
+        texto = u"\n".join(linhas)
+        checar("a leitura do osso que falha cai no recuo declarado, e a causa vai ao log",
+               modo3 == "limiar" and u"vascular, osso: falhou com OSError" in texto,
+               (modo3, texto[:200]))
+        checar("  sem o caminho do paciente no log", not _tem_paciente(texto), texto[:200])
+        fonte, _c = _sem_prosa(_componentes.fonte("app/radai_recon3d_vascular.py"))
+        checar("o osso sai pela mesma funcao do Nidus (sem copiar a regra)",
+               "osso_da_segmentacao(" in fonte and "mascaras_da_serie" not in fonte)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def _osso_no_tecido():
+    import numpy as np
+    import SimpleITK as sitk
+    forma = (40, 60, 60)
+    a = np.full(forma, 40, np.int16)
+    a[:3, :3, :3] = -1000
+    osso = np.zeros(forma, bool)
+    osso[13:27, 23:37, 23:37] = True
+    a[osso] = 1200
+    img = sitk.GetImageFromArray(a)
+    img.SetSpacing((1.0, 1.0, 1.0))
+    return img, osso
+
+
+def teste_o_vascular_so_tira_o_osso_no_mip():
+    secao("o Vascular tira o osso so no MIP: no MinIP ele viraria buraco escuro")
+    import numpy as np
+    import radai_nidus as N
+    import radai_recon3d_vascular as V
+    img, osso = _osso_no_tecido()
+
+    def _centro_minip(vol, s):
+        plano, _i = N.projetar(vol, 0, 0, "minip", "angio", lado=128,
+                               escala=s.escala)
+        h, w = plano.shape
+        return float(plano[h // 2 - 2:h // 2 + 3, w // 2 - 2:w // 2 + 3].min())
+
+    lim = N.abrir(img, "CT")
+    seg = N.abrir(img, "CT")
+    seg.tirar_osso(osso, {"fonte": "fantoma"})
+    checar("os dois modos que tiram osso estao no fantoma (limiar e segmentacao)",
+           V.modo_do_osso(lim) == "limiar" and V.modo_do_osso(seg) == "segmentacao",
+           (V.modo_do_osso(lim), V.modo_do_osso(seg)))
+    for rot, s in (("limiar", lim), ("segmentacao", seg)):
+        checar("  %s: no MIP o osso sai" % rot,
+               V.volume_da_projecao(s, False, "mip") is not s.img)
+        checar("  %s: no MinIP o volume e a imagem inteira, com o osso" % rot,
+               V.volume_da_projecao(s, False, "minip") is s.img)
+        c = _centro_minip(V.volume_da_projecao(s, False, "minip"), s)
+        checar("  %s: o MinIP pelo meio do osso mostra o tecido em volta "
+               "(40 HU), e nao um buraco" % rot, abs(c - 40.0) < 1.0, c)
+        isca = _centro_minip(V.volume_da_projecao(s, False, "mip"), s)
+        checar("  (isca) %s: com o volume do MIP, o MinIP abre o buraco escuro "
+               "onde o osso estava (%.0f HU)" % (rot, isca),
+               isca < -500.0, isca)
+    checar("a chamada sem modo continua sendo a do MIP",
+           V.volume_da_projecao(lim, False) is V.volume_da_projecao(lim, False, "mip"))
+
+
+def _vx_no_node(js, passos, isca=None):
+    import json
+    nomes = ("vxUrl", "vxErro", "vxOsso", "vxEstado", "vxPintar")
+    fns = [_funcao_js(js, n) for n in nomes]
+    if not all(fns):
+        return None, "faltam funcoes: %s" % [n for n, f in zip(nomes, fns) if not f]
+    corpo = u"\n".join(fns)
+    if isca:
+        corpo = corpo.replace(isca[0], isca[1])
+    prog = u"\n".join([
+        u"var PASSOS = %s, ATUAL = null, PEDIDOS = [], TEXTOS = [];" % json.dumps(passos, ensure_ascii=False),
+        u"function no(){ return {hidden: true, textContent: '', attrs: {},",
+        u" setAttribute: function(k, v){ this.attrs[k] = String(v) },",
+        u" getAttribute: function(k){ return this.attrs[k] == null ? null : this.attrs[k] },",
+        u" removeAttribute: function(k){ delete this.attrs[k]; if(k === 'src') this._src = '' }} }",
+        u"var IMG = no(); IMG._src = ''; IMG.style = {};",
+        u"Object.defineProperty(IMG, 'src', {get: function(){ return this._src },",
+        u" set: function(v){ var eu = this, r = ATUAL.img; eu._src = v;",
+        u"  setTimeout(function(){ if(r === 'ok'){ if(eu.onload) eu.onload() } else if(eu.onerror) eu.onerror() }, 0) }});",
+        u"var SPANS = ['segmentacao', 'limiar', 'fica'].map(function(m){ var s = no(); s.attrs['data-vx-osso'] = m; return s });",
+        u"var OSSO = no(); OSSO.querySelectorAll = function(){ return SPANS };",
+        u"var EL = {vx_img: IMG, vx_proj: no(), vx_erro: no(), vx_osso: OSSO, vx_osso_fonte: no(), vx_ang: no()};",
+        u"function r3El(i){ return EL[i] || null }",
+        u"var R3 = {b: 'b1'};",
+        u"var window = {uiCarregando: function(){}, uiTexto: function(e, t){ TEXTOS.push(t); e.textContent = t }};",
+        u"function uiCarregando(){}",
+        u"function uiTexto(e, t){ window.uiTexto(e, t) }",
+        u"function fetch(u){ PEDIDOS.push(u); var r = ATUAL.estado;",
+        u" if(r === 'rejeita' || r == null) return Promise.reject(new TypeError('Failed to fetch'));",
+        u" return Promise.resolve({json: function(){ return Promise.resolve(r) }}) }",
+        u"var VX = {lao: 0, cra: 0, modo: 'mip', jan: 'angio', lado: 512, laje: 0, inv: false,",
+        u" osso: false, zoom: 1, ux: 0, uy: 0, t: 0, pedido: 0, erro: false, osso_b: null};",
+        u"var VX_NAO_RESPONDEU = 'O app não respondeu.';",
+        corpo,
+        u"var FOTOS = [];",
+        u"function foto(){ return {erro: EL.vx_erro.hidden ? null : EL.vx_erro.textContent,",
+        u" src: IMG.src || '', modo: OSSO.getAttribute('data-modo'), pedidos: PEDIDOS.length,",
+        u" escondida: IMG.style.visibility === 'hidden',",
+        u" vistos: SPANS.filter(function(s){ return !s.hidden }).map(function(s){ return s.attrs['data-vx-osso'] }),",
+        u" fonte: EL.vx_osso_fonte.textContent} }",
+        u"function passo(){ if(!PASSOS.length){ console.log('JSON:' + JSON.stringify({fotos: FOTOS, textos: TEXTOS})); return }",
+        u" ATUAL = PASSOS.shift(); if(ATUAL.b) R3.b = ATUAL.b;",
+        u" vxPintar(false); setTimeout(function(){ FOTOS.push(foto()); passo() }, 30) }",
+        u"passo();",
+    ])
+    return _rodar_js(prog, prefixo="r3d_vx_")
+
+
+def teste_o_vascular_responde_o_motivo():
+    secao("o Vascular responde o motivo em JSON, no lugar do 404 seco, e a tela o mostra")
+    try:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+    except Exception as e:
+        checar("fastapi e o TestClient disponiveis", False,
+               "PULADO: %s" % type(e).__name__)
+        return
+    import json
+    from datetime import datetime
+    import numpy as np
+    sys.path.insert(0, AQUI)
+    import make_test_series
+    import radai_nidus as N
+    import radai_rotulos
+    import radai_thumbnail
+    import radai_recon3d_vascular as V
+    app = FastAPI()
+    V.montar(app)
+    cli = TestClient(app)
+    morto = cli.get("/api/recon3d/vascular/projecao", params={"b": "morto"})
+    checar("bilhete morto: 404 com o motivo em JSON, e nao o corpo vazio",
+           morto.status_code == 404 and morto.content
+           and morto.json() == {"erro": V.FORA_DA_LISTA}, morto.content[:120])
+    em = cli.get("/api/recon3d/vascular/estado", params={"b": "morto"})
+    checar("  e o estado do bilhete morto diz o mesmo",
+           em.status_code == 404 and em.json() == {"erro": V.FORA_DA_LISTA}, em.content[:120])
+    base = tempfile.mkdtemp(prefix="r3d_vasc_rota_")
+    V._ABERTA.update({"chave": None, "serie": None})
+    V._FALHAS.clear()
+    try:
+        pasta = os.path.join(base, PACIENTE_COM_ESPACO, "CT")
+        uid = make_test_series.escreve_serie(pasta, "PAC_VASC", datetime.now(), 24)
+        b = radai_thumbnail.bilhete(pasta, uid)
+        r = cli.get("/api/recon3d/vascular/projecao", params={"b": b, "lado": 256})
+        e = cli.get("/api/recon3d/vascular/estado", params={"b": b})
+        checar("sem segmentacao: a projecao sai em PNG e o estado diz o recuo (limiar)",
+               r.status_code == 200 and r.headers.get("content-type") == "image/png"
+               and e.status_code == 200
+               and e.json() == {"osso": {"modo": "limiar", "fonte": ""}}, e.content[:160])
+        cranio = np.zeros((24, 128, 128), dtype=bool)
+        cranio[:, 20:30, 20:108] = True
+        radai_rotulos.gravar(pasta, uid, {"total": {"skull": cranio}},
+                             ref=V.serie(b).img)
+        V._ABERTA.update({"chave": None, "serie": None})
+        r2 = cli.get("/api/recon3d/vascular/projecao", params={"b": b, "lado": 256})
+        e2 = cli.get("/api/recon3d/vascular/estado", params={"b": b}).json()
+        checar("com o mapa do ContourLab: o estado diz segmentacao, e de qual conjunto",
+               r2.status_code == 200 and (e2.get("osso") or {}).get("modo") == "segmentacao"
+               and (e2.get("osso") or {}).get("fonte"), str(e2))
+        checar("  e nenhum caminho do paciente no estado", not _tem_paciente(json.dumps(e2)))
+        orig, linhas = N.projetar, []
+        log0 = radai_thumbnail._log_da_estacao
+        radai_thumbnail._JA_REGISTRADAS.clear()
+
+        def _explode(*a, **k):
+            raise ValueError(u"Sem DICOM em C:\\%s\\CT" % PACIENTE_COM_ESPACO)
+
+        def _recusa(*a, **k):
+            raise N.SerieRecusada(N.RECUSA_POUCOS_CORTES % 1)
+        try:
+            radai_thumbnail._log_da_estacao = lambda: linhas.append
+            N.projetar = _explode
+            r3 = cli.get("/api/recon3d/vascular/projecao", params={"b": b, "lado": 256})
+            e3 = cli.get("/api/recon3d/vascular/estado", params={"b": b})
+            N.projetar = _recusa
+            r4 = cli.get("/api/recon3d/vascular/projecao", params={"b": b, "lado": 256})
+        finally:
+            N.projetar = orig
+            radai_thumbnail._log_da_estacao = log0
+        d3 = r3.json() if r3.headers.get("content-type", "").startswith("application/json") else {}
+        checar("a projecao que falha: 500 com a frase FIXA e o tipo a parte",
+               r3.status_code == 500 and d3.get("erro") == V.PROJECAO_FALHOU
+               and d3.get("tipo") == "ValueError", r3.content[:200])
+        checar("  e o estado devolve a mesma falha, sem reabrir a serie (a tela a le dali)",
+               e3.status_code == 500 and e3.json() == d3, e3.content[:200])
+        checar("  sem o caminho do paciente na resposta", not _tem_paciente(r3.text), r3.text[:200])
+        checar("  e a causa vai ao log da estacao, sem o caminho",
+               u"reconstrucoes 3D, vascular: falhou com ValueError" in u"\n".join(linhas)
+               and not _tem_paciente(u"\n".join(linhas)), u"\n".join(linhas)[:200])
+        checar("a serie recusada pelo Nidus: 422 com a frase da recusa",
+               r4.status_code == 422
+               and r4.json().get("erro") == N.RECUSA_POUCOS_CORTES % 1, r4.content[:200])
+        r5 = cli.get("/api/recon3d/vascular/projecao", params={"b": b, "lado": 256})
+        e5 = cli.get("/api/recon3d/vascular/estado", params={"b": b}).json()
+        checar("  e a projecao que volta a sair apaga a falha lembrada",
+               r5.status_code == 200 and "osso" in e5, str(e5)[:160])
+    finally:
+        V._ABERTA.update({"chave": None, "serie": None})
+        V._FALHAS.clear()
+        shutil.rmtree(base, ignore_errors=True)
+    js = V.pagina()
+    passos = [
+        {"img": "erro", "estado": {"erro": V.PROJECAO_FALHOU, "tipo": "ValueError"}},
+        {"img": "ok", "estado": {"osso": {"modo": "limiar", "fonte": ""}}},
+        {"b": "b2", "img": "ok", "estado": {"osso": {"modo": "segmentacao", "fonte": "Estudo 3D"}}},
+        {"img": "erro", "estado": {"erro": V.FORA_DA_LISTA}},
+        {"img": "erro", "estado": "rejeita"},
+        {"img": "ok", "estado": {"osso": {"modo": "segmentacao", "fonte": "Estudo 3D"}}},
+        {"img": "ok", "estado": None}]
+    d, erro = _vx_no_node(js, [dict(x) for x in passos])
+    if d is None:
+        checar("vxPintar executa no node", False, erro)
+        return
+    f = d.get("fotos") or []
+    if len(f) != 7:
+        checar("vxPintar fez os sete passos", False, str(d)[:300])
+        return
+    checar("a tela mostra o motivo da falha, pelo uiTexto (a frase se traduz)",
+           f[0]["erro"] == V.PROJECAO_FALHOU and not f[0]["src"]
+           and V.PROJECAO_FALHOU in d.get("textos", []), str(f[:1]))
+    checar("  a projecao que volta apaga o motivo e diz o recuo do limiar",
+           f[1]["erro"] is None and f[1]["src"] and f[1]["modo"] == "limiar"
+           and f[1]["vistos"] == ["limiar"], str(f[1:2]))
+    checar("  outra serie: a segmentacao, com o conjunto de onde o osso saiu",
+           f[2]["modo"] == "segmentacao" and f[2]["vistos"] == ["segmentacao"]
+           and f[2]["fonte"] == "Estudo 3D", str(f[2:3]))
+    checar("  o bilhete morto diz para recarregar a lista, sem a imagem quebrada "
+           "nem a linha do osso da serie anterior",
+           f[3]["erro"] == V.FORA_DA_LISTA and not f[3]["src"] and f[3]["escondida"]
+           and f[3]["modo"] is None and f[2]["escondida"] is False, str(f[2:4]))
+    checar("  e o servidor que nao responde diz que o app nao respondeu",
+           f[4]["erro"] == V.NAO_RESPONDEU, str(f[4:5]))
+    checar("  a barra que arrasta nao pergunta o estado a cada projecao (so depois de "
+           "falha ou serie nova)", f[6]["pedidos"] == f[5]["pedidos"] and f[6]["erro"] is None,
+           str(f[5:]))
+    di, _e = _vx_no_node(js, [dict(passos[0])],
+                         isca=(u"vxErro((d && d.erro) || VX_NAO_RESPONDEU);", u""))
+    checar("  (isca) sem mostrar o motivo, a tela ficaria muda e a checagem reprova",
+           di is not None and (di.get("fotos") or [{}])[0].get("erro") is None, str(di)[:160])
+    pag = V.pagina()
+    checar("a pagina tem as tres frases do osso e o lugar do motivo",
+           u'id="vx_erro" role="alert" hidden' in pag
+           and all(x in pag for x in (V.OSSO_PELA_SEGMENTACAO, V.OSSO_PELO_LIMIAR, V.OSSO_FICA))
+           and u'"O app não respondeu."' in pag)
+
+
 def main():
     print("test_recon3d | projecao, janela, e a fronteira")
     try:
@@ -2167,6 +2810,7 @@ def main():
         print("=" * 64)
         return 0
     testes = [teste_mip_e_minip_sao_max_e_min,
+              teste_o_vascular_so_tira_o_osso_no_mip,
               teste_a_laje_nao_estoura_o_volume,
               teste_png_sem_pil,
               teste_serie_sem_contorno_manda_para_o_auto_contorno,
@@ -2200,10 +2844,16 @@ def main():
               teste_as_malhas_saem_com_a_serie,
               teste_o_recuo_e_detectado_e_nao_presumido,
               teste_a_transparencia_desenha_na_ordem,
+              teste_o_visor_e_um_so_com_o_nidus,
+              teste_o_visor_3d_herda_do_nidus,
               teste_o_cartao_do_modulo_navega,
               teste_a_barra_e_a_bussola_falam_a_lingua_da_tela,
               teste_os_planos_saem_na_proporcao_fisica,
-              teste_a_leitura_sem_uid_saiu]
+              teste_a_leitura_sem_uid_saiu,
+              teste_o_rtstruct_fora_do_axial_vira_malha,
+              teste_o_nome_proprio_decide_pelo_nome_padrao,
+              teste_o_vascular_tira_o_osso_pela_segmentacao,
+              teste_o_vascular_responde_o_motivo]
     todos = set(k for k, v in globals().items()
                 if k.startswith("teste_") and callable(v))
     fora = sorted(todos - set(f.__name__ for f in testes))
