@@ -398,7 +398,7 @@ def teste_os_quatro_quadros():
            "max(1, int(round(float(laje) / mm)))" in fonte)
 
     checar("a tela nao escreve par de janela nenhum",
-           "R.JANELAS.get" in fonte and "1500" not in fonte)
+           "R.JANELAS.get" in fonte and "1500" not in _S.JS_SERIE)
 
 
 def teste_os_tres_cartoes_navegam():
@@ -2799,6 +2799,211 @@ def teste_o_vascular_responde_o_motivo():
            and u'"O app não respondeu."' in pag)
 
 
+def teste_os_mpr_trazem_os_contornos_nos_tres_planos():
+    secao("os contornos nos tres planos, com furos e geometria da serie")
+    import json
+    import numpy as np
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import radai_recon3d_screen as S
+    import radai_thumbnail
+    forma = (5, 9, 11)
+    esp = (3.0, 2.0, 1.0)
+    origem = (40.0, -30.0, 100.0)
+    direcao = (0, 0, 1, 0, 1, 0, -1, 0, 0)
+    d = np.asarray(direcao).reshape(3, 3)
+    plano = np.asarray(((0, 1, 0), (0, 0, 1), (1, 0, 0)))
+    polis = []
+    for z in (1, 2, 3):
+        for xy in (((1.5, 1.5), (7.5, 1.5), (7.5, 6.5), (1.5, 6.5)),
+                   ((3.5, 3.5), (5.5, 3.5), (5.5, 4.5), (3.5, 4.5))):
+            idx = np.asarray([[x, y, z] for x, y in xy])
+            lps = origem + (idx * esp[::-1]).dot(d.T)
+            polis.append(lps.dot(plano.T))
+    roi = {"nome": "Teste_ai", "cor": [220, 40, 60]}
+    conjunto = {"rois": [roi], "contornos": {"Teste_ai": polis}, "plano": plano}
+    cortes = S._cortes_para_mpr(conjunto, esp, origem, direcao)
+    checar("a geometria sagital retorna aos indices da imagem",
+           sorted(cortes["Teste_ai"]) == [1, 2, 3])
+    vol = np.zeros(forma, dtype=bool)
+    vol[1:4, 2:7, 2:8] = True
+    vol[1:4, 4, 4:6] = False
+    for eixo, indice in ((0, 2), (1, 4), (2, 5)):
+        esperado = np.take(vol, indice, axis=eixo)
+        obtido = S._mascara_do_plano(cortes["Teste_ai"], forma, eixo, indice)
+        checar("plano %d preserva a estrutura e o furo" % eixo,
+               np.array_equal(obtido, esperado))
+    checar("a conversao dos pontos e reutilizada nos proximos planos",
+           S._cortes_para_mpr(conjunto, esp, origem, direcao) is cortes)
+    mapa = SimpleNamespace(_vol={"a": vol.astype(np.uint8)},
+                           tabela=[{"nome": "Teste_ai", "chave": "a", "indice": 1}])
+    rotulos = {"tipo": "rotulos", "mapa": mapa, "rois": [roi],
+               "esp_zyx": esp, "origem": origem, "direcao": direcao}
+    for eixo, indice in ((0, 2), (1, 4), (2, 5)):
+        planos = list(S._segmentacoes_do_plano(rotulos, forma, esp, origem,
+                                              direcao, eixo, indice, None))
+        checar("mapa de rotulos no plano %d, sem criar mascara 3D" % eixo,
+               len(planos) == 1 and np.array_equal(planos[0][1],
+                                                  np.take(vol, indice, axis=eixo)))
+    app = FastAPI()
+    S.montar(app)
+    b = radai_thumbnail.bilhete("fantoma_mpr", "1.2.3.456")
+    anteriores = S._snapshot_do_volume, S.conjunto_da_serie
+    try:
+        S._snapshot_do_volume = lambda *_: (np.zeros(forma, dtype=np.int16),
+                esp, ("sup", "post", "esq"), origem, direcao)
+        S.conjunto_da_serie = lambda *_: (conjunto, "teste", [], ())
+        cli = TestClient(app)
+        for eixo in (0, 1, 2):
+            r = cli.get("/api/recon3d/projecao", params={
+                "b": b, "eixo": eixo, "laje": 0, "segmentacao": True})
+            checar("a imagem do plano %d inclui contorno colorido" % eixo,
+                   r.status_code == 200 and "image/svg+xml" in r.headers.get("content-type", "")
+                   and '<path d="' in r.text and 'rgb(220,40,60)' in r.text
+                   and "data:image/png;base64," in r.text)
+        r = cli.get("/api/recon3d/projecao", params={
+            "b": b, "laje": 0, "segmentacao": True, "nomes": json.dumps([])})
+        checar("desligar todas tambem oculta os contornos nos planos",
+               r.status_code == 200 and "<path " not in r.text)
+        for modo in ("mip", "minip"):
+            r = cli.get("/api/recon3d/projecao", params={
+                "b": b, "laje": 10, "modo": modo, "segmentacao": True})
+            checar("%s continua sem sobrepor segmentacao" % modo,
+                   r.status_code == 200 and r.content[:8] == b"\x89PNG\r\n\x1a\n")
+    finally:
+        S._snapshot_do_volume, S.conjunto_da_serie = anteriores
+
+
+def teste_o_volume_e_a_geometria_sao_da_mesma_serie():
+    secao("troca concorrente de serie nao mistura imagem e geometria")
+    import threading
+    import numpy as np
+    import SimpleITK as sitk
+    import engine
+    import radai_recon3d_screen as S
+    import radai_thumbnail
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    imagens = {}
+    for uid, valor, esp, origem, direcao in (
+            ("A", 40, (1, 2, 3), (1, 2, 3), (1, 0, 0, 0, 1, 0, 0, 0, 1)),
+            ("B", 900, (2, 3, 4), (101, 202, 303), (0, 0, 1, 0, 1, 0, -1, 0, 0))):
+        img = sitk.GetImageFromArray(np.full((3, 7, 9), valor, dtype=np.int16))
+        img.SetSpacing(tuple(float(x) for x in esp))
+        img.SetOrigin(tuple(float(x) for x in origem))
+        img.SetDirection(tuple(float(x) for x in direcao))
+        imagens[uid] = img
+
+    def com_troca(operacao, quente=False):
+        trocar, terminou, parar = (threading.Event() for _ in range(3))
+        dono, erros, trocas = [], [], []
+        original = engine.load_sitk, S._TRAVA_VOL, S._armar_relogio
+        cache = dict(S._VOL)
+
+        def ler(_pasta, uid):
+            if uid == "A":
+                dono[:] = [threading.get_ident()]
+            return imagens[uid]
+
+        class TravaComTroca:
+            def __enter__(self):
+                original[1].acquire()
+                if not dono and threading.current_thread() is not t:
+                    dono[:] = [threading.get_ident()]
+
+            def __exit__(self, *_):
+                chave = S._VOL.get("chave") or ()
+                agir = (dono == [threading.get_ident()]
+                        and len(chave) == 2 and chave[1] == "A")
+                original[1].release()
+                if agir:
+                    terminou.clear()
+                    trocar.set()
+                    if not terminou.wait(5):
+                        raise RuntimeError("a troca sintetica nao terminou")
+
+        def segunda_serie():
+            while trocar.wait(5):
+                trocar.clear()
+                if parar.is_set():
+                    return
+                try:
+                    S._volume("fantoma_concorrente_B", "B")
+                    trocas.append(True)
+                except Exception as e:
+                    erros.append(type(e).__name__)
+                finally:
+                    terminou.set()
+
+        t = threading.Thread(target=segunda_serie, daemon=True)
+        try:
+            engine.load_sitk = ler
+            S._armar_relogio = lambda *_: None
+            S._esquecer_serie()
+            if quente:
+                S._volume("fantoma_concorrente_A", "A")
+                dono[:] = []
+            S._TRAVA_VOL = TravaComTroca()
+            t.start()
+            resultado = operacao()
+            return resultado, bool(trocas) and not erros
+        finally:
+            parar.set()
+            trocar.set()
+            t.join(5)
+            engine.load_sitk, S._TRAVA_VOL, S._armar_relogio = original
+            with S._TRAVA_VOL:
+                S._VOL.clear()
+                S._VOL.update(cache)
+
+    (v, esp, origem, direcao), alternou = com_troca(
+        lambda: S._volume_lps("fantoma_concorrente_A", "A"))
+    checar("outra thread substituiu o cache antes do retorno de A", alternou)
+    checar("o volume LPS retido continua inteiramente da serie A",
+           bool((v == 40).all()) and esp == (3, 2, 1)
+           and origem == (1, 2, 3) and direcao == imagens["A"].GetDirection())
+    (v, esp, origem, direcao), alternou = com_troca(
+        lambda: S._volume_lps("fantoma_concorrente_A", "A"), quente=True)
+    checar("a leitura do cache tambem retém toda a geometria de A",
+           alternou and bool((v == 40).all()) and esp == (3, 2, 1)
+           and origem == (1, 2, 3) and direcao == imagens["A"].GetDirection())
+    tripla, alternou = com_troca(lambda: S._volume("fantoma_concorrente_A", "A"))
+    checar("a API _volume mantem tres valores da mesma serie",
+           alternou and len(tripla) == 3 and bool((tripla[0] == 40).all())
+           and tripla[1] == (3, 2, 1) and tripla[2] == ("sup", "post", "esq"))
+    app = FastAPI()
+    S.montar(app)
+    b = radai_thumbnail.bilhete("fantoma_concorrente_A", "A")
+    pontos = np.asarray([[2, 2, 1], [5, 2, 1], [5, 5, 1], [2, 5, 1]])
+    lps = pontos * (1, 2, 3) + (1, 2, 3)
+    conjunto = {"rois": [{"nome": "Teste_ai", "cor": [20, 80, 180]}],
+                "contornos": {"Teste_ai": [lps]}, "plano": None}
+    anteriores = S.conjunto_da_serie, S._png_com_contornos
+    geometrias = []
+
+    def sobrepor(png, c, forma, esp, origem, direcao, sentido, eixo, indice, nomes):
+        geometrias.append((esp, origem, direcao, sentido))
+        return anteriores[1](png, c, forma, esp, origem, direcao,
+                             sentido, eixo, indice, nomes)
+    try:
+        S.conjunto_da_serie = lambda *_: (conjunto, "teste", [], ())
+        S._png_com_contornos = sobrepor
+        with TestClient(app) as cli:
+            r, alternou = com_troca(lambda: cli.get(
+                "/api/recon3d/projecao", params={"b": b, "eixo": 0,
+                                               "pos": 0.5, "laje": 0,
+                                               "segmentacao": True}))
+        checar("a rota MPR conserva a geometria do PNG apesar da troca",
+               alternou and geometrias == [((3, 2, 1), (1, 2, 3),
+                    imagens["A"].GetDirection(), ("sup", "post", "esq"))])
+        checar("o contorno de A continua no plano de A depois da troca",
+               r.status_code == 200 and "<path " in r.text
+               and "rgb(20,80,180)" in r.text)
+    finally:
+        S.conjunto_da_serie, S._png_com_contornos = anteriores
+
+
 def main():
     print("test_recon3d | projecao, janela, e a fronteira")
     try:
@@ -2853,7 +3058,9 @@ def main():
               teste_o_rtstruct_fora_do_axial_vira_malha,
               teste_o_nome_proprio_decide_pelo_nome_padrao,
               teste_o_vascular_tira_o_osso_pela_segmentacao,
-              teste_o_vascular_responde_o_motivo]
+              teste_o_vascular_responde_o_motivo,
+              teste_os_mpr_trazem_os_contornos_nos_tres_planos,
+              teste_o_volume_e_a_geometria_sao_da_mesma_serie]
     todos = set(k for k, v in globals().items()
                 if k.startswith("teste_") and callable(v))
     fora = sorted(todos - set(f.__name__ for f in testes))

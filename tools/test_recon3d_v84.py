@@ -666,9 +666,11 @@ def teste_as_tres_telas_no_padrao():
                vis[vis.find(u"TPS") - 60:vis.find(u"TPS") + 20])
         checar(u"[%s] sem parágrafo longo de fronteira na tela" % fer,
                "r3-semexp" not in p and "md-semexp" not in p)
-        checar(u"[%s] a gravação do visor está na coluna da lista" % fer,
-               re.search(r'<aside class="r3-l3d".*?class="r3-grav"', p, re.S)
-               is not None)
+        meio = re.search(r'<div class="r3-ferramentas">(.*?)</div>'
+                         r'<aside class="r3-l3d"', p, re.S)
+        checar(u"[%s] a gravação e as incidências estão na coluna do meio" % fer,
+               meio is not None and 'id="r3_gravar"' in meio.group(1)
+               and 'id="r3_inc3d"' in meio.group(1))
     ger = _paginas()["geral"]
     i3d, igr, ijan = (ger.find('class="r3-3d"'), ger.find('class="r3-grade"'),
                       ger.find('id="j_pulmao"'))

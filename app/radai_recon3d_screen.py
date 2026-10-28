@@ -85,13 +85,15 @@ def _marcar_visto():
         _armar_relogio(SOLTAR_APOS_S)
 
 
-def _volume(pasta, uid):
+def _snapshot_do_volume(pasta, uid):
     import time
     chave = (str(pasta), str(uid or ""))
     with _TRAVA_VOL:
         if _VOL["chave"] == chave and _VOL["v"] is not None:
             _VOL["visto"] = time.time()
-            return _VOL["v"], _VOL["esp"], _VOL["sentido"]
+            return (_VOL["v"], _VOL["esp"], _VOL["sentido"],
+                    _VOL.get("origem") or (0.0, 0.0, 0.0),
+                    _VOL.get("direcao") or (1, 0, 0, 0, 1, 0, 0, 0, 1))
         _esquecer_serie()
         import engine
         import SimpleITK as sitk
@@ -107,12 +109,17 @@ def _volume(pasta, uid):
                 u"reconstrucoes 3D, orientacao", e,
                 bilhete=u"%s\x00%s" % (pasta, uid or u""))
             sentido = None
+        origem = tuple(float(o) for o in img.GetOrigin())
+        direcao = tuple(float(d) for d in img.GetDirection())
         _VOL.update({"chave": chave, "v": v, "esp": esp, "sentido": sentido,
-                     "origem": tuple(float(o) for o in img.GetOrigin()),
-                     "direcao": tuple(float(d) for d in img.GetDirection()),
+                     "origem": origem, "direcao": direcao,
                      "visto": time.time()})
         _armar_relogio(SOLTAR_APOS_S)
-        return v, esp, sentido
+        return v, esp, sentido, origem, direcao
+
+
+def _volume(pasta, uid):
+    return _snapshot_do_volume(pasta, uid)[:3]
 
 
 def sentido_cranial(sentido):
@@ -121,10 +128,7 @@ def sentido_cranial(sentido):
 
 
 def _volume_lps(pasta, uid):
-    v, esp, _s = _volume(pasta, uid)
-    with _TRAVA_VOL:
-        origem = _VOL.get("origem") or (0.0, 0.0, 0.0)
-        direcao = _VOL.get("direcao") or (1, 0, 0, 0, 1, 0, 0, 0, 1)
+    v, esp, _s, origem, direcao = _snapshot_do_volume(pasta, uid)
     return v, esp, origem, direcao
 
 
@@ -423,8 +427,101 @@ def malha_do_desenho(b, cortes):
     return R.stl_da_malha(verts, faces), sorted(por_corte)
 
 
+def _cortes_para_mpr(conjunto, esp, origem, direcao):
+    import numpy as np
+    geometria = (tuple(esp), tuple(origem), tuple(direcao))
+    with _TRAVA_MALHA:
+        cache = conjunto.get("_mpr")
+        if cache and cache[0] == geometria:
+            return cache[1]
+        inversa = np.linalg.inv(np.asarray(direcao).reshape(3, 3))
+        por_nome = {}
+        plano = conjunto.get("plano")
+        for nome, contornos in conjunto.get("contornos", {}).items():
+            cortes = {}
+            for pontos in contornos:
+                p = np.asarray(pontos, dtype=np.float64)
+                if plano is not None:
+                    p = p.dot(plano)
+                idx = ((p - origem).dot(inversa.T)
+                       / np.asarray(esp[::-1]))
+                z = int(round(float(np.median(idx[:, 2]))))
+                cortes.setdefault(z, []).append(idx[:, :2])
+            por_nome[nome] = cortes
+        conjunto["_mpr"] = (geometria, por_nome)
+        return por_nome
+
+
+def _mascara_do_plano(cortes, forma, eixo, indice):
+    import numpy as np
+    import radai_recon3d as R
+    if eixo == 0:
+        return R._par_impar(cortes.get(indice, ()), 0, 0, 1,
+                             forma[2], forma[1])
+    largura = forma[2] if eixo == 1 else forma[1]
+    m = np.zeros((forma[0], largura), dtype=bool)
+    for z, polis in cortes.items():
+        if not 0 <= z < forma[0]:
+            continue
+        p = polis if eixo == 1 else [a[:, [1, 0]] for a in polis]
+        m[z] = R._par_impar(p, 0, indice, 1, largura, 1)[0]
+    return m
+
+
+def _segmentacoes_do_plano(conjunto, forma, esp, origem, direcao,
+                           eixo, indice, nomes):
+    import numpy as np
+    if conjunto.get("tipo") == "rotulos":
+        if (any(tuple(v.shape) != tuple(forma)
+                for v in conjunto["mapa"]._vol.values())
+                or not np.allclose(conjunto["esp_zyx"], esp)
+                or not np.allclose(conjunto["origem"], origem)
+                or not np.allclose(conjunto["direcao"], direcao)):
+            raise ValueError("mapa fora da geometria da serie")
+        tabela = {t["nome"]: t for t in conjunto["mapa"].tabela}
+        for roi in conjunto["rois"]:
+            if nomes is not None and roi["nome"] not in nomes:
+                continue
+            t = tabela[roi["nome"]]
+            vol = conjunto["mapa"]._vol[t["chave"]]
+            yield roi, np.take(vol, indice, axis=eixo) == int(t["indice"])
+        return
+    cortes = _cortes_para_mpr(conjunto, esp, origem, direcao)
+    for roi in conjunto["rois"]:
+        if nomes is not None and roi["nome"] not in nomes:
+            continue
+        yield roi, _mascara_do_plano(cortes.get(roi["nome"], {}), forma,
+                                     eixo, indice)
+
+
+def _png_com_contornos(png, conjunto, forma, esp, origem, direcao,
+                       sentido, eixo, indice, nomes):
+    import base64
+    import struct
+    import radai_recon3d as R
+    import radai_viewseg
+    largura, altura = struct.unpack(">II", png[16:24])
+    paths = []
+    for roi, m in _segmentacoes_do_plano(
+            conjunto, forma, esp, origem, direcao, eixo, indice, nomes):
+        d = radai_viewseg.bordas_svg(R.plano_para_a_tela(m, eixo, esp, sentido))
+        if d:
+            cor = [max(0, min(255, int(v))) for v in roi["cor"][:3]]
+            paths.append('<path d="%s" stroke="rgb(%d,%d,%d)"/>'
+                         % (d, cor[0], cor[1], cor[2]))
+    imagem = base64.b64encode(png).decode("ascii")
+    return ('<svg xmlns="http://www.w3.org/2000/svg" '
+            'xmlns:xlink="http://www.w3.org/1999/xlink" '
+            'viewBox="0 0 %d %d" width="%d" height="%d">'
+            '<image width="%d" height="%d" '
+            'xlink:href="data:image/png;base64,%s"/>'
+            '<g fill="none" stroke-width="1.2" stroke-linejoin="round">%s'
+            '</g></svg>' % (largura, altura, largura, altura, largura, altura,
+                            imagem, "".join(paths))).encode("utf-8")
+
+
 CSS = u"""
-.r3-wrap{max-width:1320px;margin:0 auto;padding:28px 22px 40px}
+.r3-wrap{--r3-altura:calc(min(68vh,620px) - 78px);max-width:1612px;margin:0 auto;padding:28px 22px 40px}
 .r3-wrap .ps-cx{margin-top:22px}
 .r3-serie{display:flex;flex-direction:column;gap:8px;margin-top:22px}
 .r3-lista{display:flex;flex-direction:column;gap:6px;max-height:262px;overflow:auto;
@@ -460,10 +557,25 @@ CSS = u"""
 .r3-estado:empty{display:none}
 .r3-estado.falta{border-left:2px solid var(--aviso);padding:4px 0 4px 12px}
 .r3-estado .ui-bt{margin-left:8px}
-.r3-3d{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:12px;align-items:stretch}
-@media (max-width:980px){.r3-3d{grid-template-columns:minmax(0,1fr)}}
+.r3-3d{display:grid;grid-template-columns:minmax(0,944px) 256px 320px;gap:12px;align-items:stretch}
+.r3-ferramentas{display:flex;flex-direction:column;gap:12px;min-width:0;
+ height:var(--r3-altura);min-height:234px;overflow:auto;border:1px solid var(--line);
+ border-radius:8px;background:var(--panel-2)}
+.r3-ferramentas .r3-inc3d{padding:10px;flex-direction:column;align-items:stretch;gap:14px}
+.r3-ferramentas .r3-inc3d .g{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.r3-ferramentas .r3-barra{flex-wrap:wrap;justify-content:space-between}
+.r3-ferramentas .r3-barra input[type=range]{width:calc(100% - 66px);min-width:80px}
+.r3-ferramentas .r3-barra b{width:100%;text-align:center}
+.r3-ferramentas .r3-grav{margin-top:auto}
+@media (max-width:1500px){.r3-wrap{max-width:1320px}
+ .r3-3d{grid-template-columns:minmax(0,1fr) 320px}
+ .r3-ferramentas{grid-column:1/-1;grid-row:2;height:auto;min-height:0;display:grid;
+ grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start}
+ .r3-ferramentas .r3-inc3d{grid-row:span 2}.r3-ferramentas .r3-grav{margin-top:0}}
+@media (max-width:980px){.r3-3d{grid-template-columns:minmax(0,1fr)}
+ .r3-ferramentas{grid-column:auto;grid-row:auto;display:flex}.r3-l3d{grid-row:2}}
 .r3-col3d{display:flex;flex-direction:column;gap:6px;min-width:0;
- height:min(68vh,620px);min-height:300px}
+ height:var(--r3-altura);min-height:234px}
 .r3-tela3d{position:relative;border-radius:8px;background:var(--img-fundo);overflow:hidden;
  flex:1 1 auto;min-height:220px}
 .r3-inc3d{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;flex:none}
@@ -507,7 +619,7 @@ CSS = u"""
 @keyframes r3pulsa{50%{opacity:.25}}
 @media (prefers-reduced-motion:reduce){.r3-rec i{animation:none}}
 .r3-l3d{border:1px solid var(--line);border-radius:8px;background:var(--panel-2);
- display:flex;flex-direction:column;min-width:0;height:min(68vh,620px);min-height:300px}
+ display:flex;flex-direction:column;min-width:0;height:var(--r3-altura);min-height:234px}
 @media (max-width:980px){.r3-l3d{height:auto;max-height:none}}
 .r3-l3cab{padding:9px 10px 7px;border-bottom:1px solid var(--line);
  display:flex;flex-direction:column;gap:7px}
@@ -790,12 +902,18 @@ function r3Estado(d, erro){
 
 var R3_PLANOS = [{eixo: 0, rot: 'axial'}, {eixo: 1, rot: 'coronal'},
                  {eixo: 2, rot: 'sagital'}];
-function r3UrlDe(eixo, laje, pos, jan, modo){
+function r3UrlDe(eixo, laje, pos, jan, modo, segmentacao){
+ var extra = '';
+ if(segmentacao && window.R3M && R3M.b === R3.b && R3M.rs){
+  var nomes = R3M.estr.filter(function(e){ return R3M.lig[e.nome] }).map(function(e){ return e.nome });
+  extra = '&segmentacao=true&rs=' + encodeURIComponent(R3M.rs)
+   + '&nomes=' + encodeURIComponent(JSON.stringify(nomes));
+ }
  return '/api/recon3d/projecao?b=' + encodeURIComponent(R3.b)
    + '&modo=' + modo + '&eixo=' + eixo + '&janela=' + jan
-   + '&laje=' + laje + '&pos=' + pos;
+    + '&laje=' + laje + '&pos=' + pos + extra;
 }
-function r3Url(eixo, laje){ return r3UrlDe(eixo, laje, R3.pos[eixo], R3.jan, R3.modo) }
+function r3Url(eixo, laje){ return r3UrlDe(eixo, laje, R3.pos[eixo], R3.jan, R3.modo, laje === 0) }
 function r3Ampliar(p, img){
  if(!R3.b || !R3.forma || !window.uiVisor) return;
  var n = R3.forma[p.eixo], v = null;
@@ -804,7 +922,7 @@ function r3Ampliar(p, img){
   cranial: p.eixo === 0 ? R3.cranial : 0,
   janelas: [{chave: 'pulmao', rotulo: 'pulmão'}, {chave: 'mediastino', rotulo: 'mediastino'},
             {chave: 'osso', rotulo: 'osso'}, {chave: 'cerebro', rotulo: 'cérebro'}],
-  src: function(i, j){ return r3UrlDe(p.eixo, 0, n > 1 ? i / (n - 1) : 0, j, 'mip') },
+   src: function(i, j){ return r3UrlDe(p.eixo, 0, n > 1 ? i / (n - 1) : 0, j, 'mip', true) },
   cabecalho: function(i){ return [['corte', (i + 1) + ' / ' + n]] },
   aoFechar: function(){
    if(!v) return;
@@ -818,7 +936,7 @@ function r3Pintar(eixo){
  if(!R3.b) return;
  var img = r3El('r3_img' + eixo); if(!img) return;
  img.onerror = function(){ img.removeAttribute('src') };
- img.src = r3Url(eixo, 0);
+  img.src = r3Url(eixo, 0);
 }
 function r3Proj(){
  if(!R3.b) return;
@@ -826,7 +944,8 @@ function r3Proj(){
  img.onerror = function(){ img.removeAttribute('src') };
  img.src = r3Url(R3.proj, R3.laje);
 }
-function r3PintarTudo(){ R3_PLANOS.forEach(function(p){ r3Pintar(p.eixo) }); r3Proj() }
+function r3PintarPlanos(){ if(R3.forma) R3_PLANOS.forEach(function(p){ r3Pintar(p.eixo) }) }
+function r3PintarTudo(){ r3PintarPlanos(); r3Proj() }
 function r3Jan(j){ R3.jan = j; r3Marcar(); r3PintarTudo() }
 function r3Modo(m){ R3.modo = m; r3Marcar(); r3Proj() }
 function r3Marcar(){
@@ -1783,6 +1902,7 @@ function r3mStatus(k){
 }
 
 function r3mSincronizar(){
+ if(window.r3PintarPlanos) r3PintarPlanos();
  if(R3M.modo === 'nuvem'){ r3nCarregar(); return }
  var falta = r3mChaves().filter(function(k){
   return k.charAt(0) !== '#' && R3M.lig[k] && !R3G.objs[r3mChave(k)] && R3M.st[k] !== 'erro'
@@ -2130,7 +2250,8 @@ def html_palco(fer, desenho=False):
         u'<span class="r3-rec" id="r3_rec" hidden><i></i>REC '
         u'<b id="r3_rec_t">00:00</b></span>'
         u'<span class="r3-dica3d" id="dica3d" data-radai-frase>escolha uma '
-        u'série</span></div>%s</div>'
+        u'série</span></div></div>'
+        u'<div class="r3-ferramentas">%s%s%s</div>'
         u'<aside class="r3-l3d" aria-label="estruturas do 3D">'
         u'<div class="r3-l3cab">'
         u'<label for="r3_rs" data-radai-frase>conjunto de contornos</label>'
@@ -2146,7 +2267,7 @@ def html_palco(fer, desenho=False):
         u'<div class="r3-l3rolar"><div id="r3_estr"></div>'
         u'<div class="r3-l3sub" id="r3_cab_camadas" hidden data-radai-frase>'
         u'osso e pele pela densidade da TC</div>'
-        u'<div id="r3_camadas3d"></div></div>%s%s</aside></div>'
+        u'<div id="r3_camadas3d"></div></div></aside></div>'
         u'<p class="r3-aviso3d" id="r3_aviso3d" hidden><span data-radai-frase>'
         u'Este navegador não desenha WebGL: o 3D aparece em nuvem de pontos, '
         u'sem transparência.</span> <code id="r3_motivo3d"></code></p></div>'
@@ -2337,13 +2458,14 @@ def montar(app):
     @app.get("/api/recon3d/projecao")
     def _projecao(b: str = "", modo: str = "mip", eixo: int = 0,
                   janela: str = "pulmao", laje: float = 10.0,
-                  pos: float = 0.5):
+                  pos: float = 0.5, segmentacao: bool = False,
+                  rs: str = "", nomes: str = ""):
         try:
             import radai_recon3d as R
             pasta, uid = _pasta_do_bilhete(b)
             if not pasta:
                 return Response(status_code=404, content=b"")
-            v, esp, sentido = _volume(pasta, uid)
+            v, esp, sentido, origem, direcao = _snapshot_do_volume(pasta, uid)
             mm = float(esp[int(eixo)]) or 1.0
             n = v.shape[int(eixo)]
             espessura = max(1, int(round(float(laje) / mm)))
@@ -2353,6 +2475,19 @@ def montar(app):
             a = R.plano_para_a_tela(a, int(eixo), esp, sentido)
             c, l = R.JANELAS.get(str(janela), R.JANELAS["mediastino"])
             png = R.para_png(a, c, l)
+            if segmentacao and float(laje) == 0.0:
+                import json
+                quer = set(json.loads(nomes)) if nomes else None
+                try:
+                    conjunto, _rs, _arqs, _k = conjunto_da_serie(b, rs)
+                except SemSerie:
+                    conjunto = None
+                if conjunto is not None:
+                    svg = _png_com_contornos(
+                        png, conjunto, v.shape, esp, origem, direcao, sentido,
+                        int(eixo), max(0, min(n - 1, centro)), quer)
+                    return Response(content=svg, media_type="image/svg+xml",
+                                    headers={"Cache-Control": "no-store"})
             return Response(content=png, media_type="image/png",
                             headers={"Cache-Control": "no-store"})
         except Exception:
