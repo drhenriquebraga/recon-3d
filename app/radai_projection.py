@@ -450,6 +450,11 @@ def compactar(m):
     return Compacto(np.packbits(a, axis=-1), a.shape)
 
 
+def consenso(img, incidencias, lado=LADO_PADRAO, chunk_voxels=262144):
+    from radai_projection_consensus import ProjectionConsensus
+    return ProjectionConsensus(img, incidencias, lado=lado, chunk_voxels=chunk_voxels)
+
+
 def intersecao(*tubos):
     import numpy as np
     if len(tubos) == 1 and isinstance(tubos[0], (list, tuple)):

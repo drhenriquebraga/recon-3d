@@ -11,6 +11,7 @@
     "radai_recon3d_screen.py",
     "radai_recon3d_vascular.py",
     "radai_projection.py",
+    "radai_projection_consensus.py",
     "radai_projection_bone.py"
   ],
   "baterias": [

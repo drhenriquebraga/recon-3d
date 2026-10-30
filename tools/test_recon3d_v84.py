@@ -516,7 +516,7 @@ def _cranio_sintetico():
 def teste_a_vascular_tira_a_calota():
     secao(u"a Vascular: o osso sai da projeção, e o vaso fica")
     import SimpleITK as sitk
-    import radai_nidus as N
+    import radai_projection as N
     import radai_recon3d_vascular as V
     img, casca, vaso = _cranio_sintetico()
     sem = sitk.GetArrayFromImage(V.retirar_osso(img))
