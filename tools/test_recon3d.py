@@ -2083,16 +2083,13 @@ def teste_o_visor_e_um_so_com_o_nidus():
     checar("a tela das Reconstrucoes usa o modulo, sem copia do leitor de STL",
            S.JS_MALHA.startswith(G.JS)
            and S.JS_MALHA.count("function r3gLerStl(") == 1)
-    try:
-        import radai_nidus_screen as NS
-        checar("o Nidus importa o mesmo modulo", G.JS in NS.pagina())
-    except Exception as e:
-        checar("o Nidus importa o mesmo modulo", False, str(e)[:80])
+    checar("o visor base pode ser usado sem importar a tela Nidus",
+           "radai_nidus_screen" not in __import__("sys").modules)
 
 
 def teste_o_visor_3d_herda_do_nidus():
     secao("o visor 3D herda do Nidus: Ver atraves, as barras e as incidencias")
-    import radai_nidus as N
+    import radai_projection as N
     import radai_recon3d_screen as S
     p = S.pagina("geral")
     checar("o botao «Ver atraves» esta no visor", 'id="r3_atraves"' in p
@@ -2309,7 +2306,7 @@ def teste_os_planos_saem_na_proporcao_fisica():
         return
     import numpy as np
     import engine
-    import radai_nidus as N
+    import radai_projection as N
     import radai_recon3d as R
     import radai_thumbnail
     import radai_recon3d_screen as S
@@ -2486,8 +2483,8 @@ def teste_o_vascular_tira_o_osso_pela_segmentacao():
     secao("o Vascular tira o osso pela segmentacao do ContourLab, e o limiar so como recuo")
     import numpy as np
     import SimpleITK as sitk
-    import radai_nidus as N
-    import radai_nidus_screen as NS
+    import radai_projection as N
+    import radai_projection_bone as NS
     import radai_rotulos
     import radai_thumbnail
     import radai_recon3d_vascular as V
@@ -2581,7 +2578,7 @@ def _osso_no_tecido():
 def teste_o_vascular_so_tira_o_osso_no_mip():
     secao("o Vascular tira o osso so no MIP: no MinIP ele viraria buraco escuro")
     import numpy as np
-    import radai_nidus as N
+    import radai_projection as N
     import radai_recon3d_vascular as V
     img, osso = _osso_no_tecido()
 
@@ -2675,7 +2672,7 @@ def teste_o_vascular_responde_o_motivo():
     import numpy as np
     sys.path.insert(0, AQUI)
     import make_test_series
-    import radai_nidus as N
+    import radai_projection as N
     import radai_rotulos
     import radai_thumbnail
     import radai_recon3d_vascular as V

@@ -2173,15 +2173,15 @@ _VISTAS = ((u"ant", u"anterior", u"A"), (u"post", u"posterior", u"P"),
 
 
 def _html_incidencias_3d():
-    import radai_nidus
+    import radai_projection
     import radai_ui
     bts = u"".join(
         u'<button type="button" class="r3-inc" data-lao="%d" data-cra="%d" '
         u'aria-pressed="false" onclick="r3IncAplicar(%d,%d,true)">'
         u'<span>%s</span><small translate="no">%s</small>'
         u'</button>' % (int(lao), int(cra), int(lao), int(cra), nome,
-                        radai_nidus.rotulo_do_angulo(lao, cra))
-        for nome, lao, cra in radai_nidus.INCIDENCIAS)
+                        radai_projection.rotulo_do_angulo(lao, cra))
+        for nome, lao, cra in radai_projection.INCIDENCIAS)
     return (u'<div class="r3-inc3d" id="r3_inc3d">'
             u'<button type="button" class="ui-bt r3-atraves" id="r3_atraves" '
             u'aria-pressed="false" onclick="r3Atraves()" '
@@ -2327,8 +2327,8 @@ def pagina(ferramenta="geral"):
                            + _html_miniaturas(), ident=u"r3_p2")
     corpo = (_html_cabeca(fer, AJUDA_DA_TELA[fer]) + _html_passo_serie()
              + palco + radai_ui.alerta(ALERTA_DA_TELA))
-    import radai_nidus
-    js = (radai_viewer.JS_3D + radai_nidus.JS_CONVENCAO + JS_MALHA + JS_GRAVAR
+    import radai_projection
+    js = (radai_viewer.JS_3D + radai_projection.JS_CONVENCAO + JS_MALHA + JS_GRAVAR
           + JS_SERIE
           + (JS_DESENHO if fer == "toracica" else u""))
     return (u'<!doctype html><html><head><meta charset="utf-8">'

@@ -9,7 +9,9 @@
     "radai_recon3d_desenho.py",
     "radai_recon3d_gl.py",
     "radai_recon3d_screen.py",
-    "radai_recon3d_vascular.py"
+    "radai_recon3d_vascular.py",
+    "radai_projection.py",
+    "radai_projection_bone.py"
   ],
   "baterias": [
     "test_recon3d.py",

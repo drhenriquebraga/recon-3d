@@ -76,7 +76,7 @@ def serie(b):
             return _ABERTA["serie"]
         _ABERTA.update({"chave": None, "serie": None})
         import engine
-        import radai_nidus as N
+        import radai_projection as N
         img = engine.load_sitk(pasta, uid or None)
         mod = u""
         try:
@@ -95,7 +95,7 @@ def serie(b):
 def ler_osso(s, pasta, uid, bilhete=u""):
     s.osso_fonte = u""
     try:
-        import radai_nidus_screen as NS
+        import radai_projection_bone as NS
         m, info = NS.osso_da_segmentacao(s, pasta, uid)
         if m is not None and s.tirar_osso(m, info):
             s.osso_fonte = str((info or {}).get("fonte") or u"")
@@ -150,7 +150,7 @@ def volume_da_projecao(s, com_osso=False, modo="mip"):
 
 def projecao_png(b, lao=0.0, cra=0.0, modo="mip", janela="angio", lado=512,
                  laje=0.0, inverter=False, com_osso=False):
-    import radai_nidus as N
+    import radai_projection as N
     import radai_recon3d as R
     s = serie(b)
     if s is None:
@@ -170,7 +170,7 @@ def projecao_png(b, lao=0.0, cra=0.0, modo="mip", janela="angio", lado=512,
 
 
 def _ajuda():
-    import radai_nidus as N
+    import radai_projection as N
     return (u"A angiografia sintética projeta a própria imagem e não precisa "
             u"de segmentação; quando a série tem a do ContourLab, o osso sai "
             u"por ela.",
@@ -341,7 +341,7 @@ window.addEventListener('DOMContentLoaded', function(){
 
 
 def _html_projecao():
-    import radai_nidus as N
+    import radai_projection as N
     inc = u"".join(
         u'<button type="button" class="jan" data-vx="inc" data-v="%g,%g">'
         u'<span %s>%s</span></button>'
@@ -427,7 +427,7 @@ def pagina():
 
 
 def resposta_de_falha(e):
-    import radai_nidus as N
+    import radai_projection as N
     if isinstance(e, N.SerieRecusada):
         return 422, {"erro": str(e)}
     return 500, {"erro": PROJECAO_FALHOU, "tipo": type(e).__name__}

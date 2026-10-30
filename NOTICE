@@ -1,0 +1,7 @@
+Shared projection modules
+
+radai_projection.py and radai_projection_bone.py derive from NIDUS_RT,
+commit 4067bddc3c875af62c6917362661d3d3d1d0036b (29 October 2026).
+Original Apache-2.0 license: licenses/NIDUS_RT_APACHE_2.txt.
+The extraction changes ownership/imports only; the projection geometry,
+incidence convention and segmentation-based bone rules are preserved.
