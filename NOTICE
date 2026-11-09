@@ -1,0 +1,7 @@
+Shared projection modules
+
+radai_projection.py and radai_projection_bone.py derive from Nidus RT.
+radai_recon3d_carm.py shares the illustrative C-arm geometry from Nidus RT.
+Original Apache-2.0 license: licenses/NIDUS_RT_APACHE_2.txt.
+The shared projection geometry, incidence convention and
+segmentation-based bone rules are preserved.
