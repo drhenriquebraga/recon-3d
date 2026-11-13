@@ -1029,6 +1029,10 @@ function r3IniciarTela(){
  });
  var pa = r3El('r3_pasta');
  if(pa) pa.addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preventDefault(); r3Outra() } });
+ var fav = document.querySelector('[data-ui-fav="r3_pasta"]');
+ if(fav) fav._uiAoPreencher = function(){ r3Outra() };
+ var dates = r3El('r3_dias');
+ if(dates) dates.onchange = function(){ if(pa && pa.value.trim()) r3Outra() };
  var fl = r3El('r3_filtro');
  if(fl) fl.addEventListener('input', function(){ if(window.r3mFiltrar) r3mFiltrar(fl.value) });
  if(window.r3mIniciar) r3mIniciar();
@@ -2141,8 +2145,7 @@ def _html_passo_serie(fer=None):
              u'aria-label="pasta com as séries">%s</div>'
              u'<button type="button" class="ui-bt" onclick="r3Procurar(this)">'
              u'%s<span data-radai-frase>Procurar</span></button>'
-             u'<button type="button" class="ui-bt pri" onclick="r3Outra()">'
-             u'<span data-radai-frase>Listar</span></button></div>'
+             u'</div>'
              u'<div class="r3-filtro">%s</div>'
              u'<div class="ui-vl-est" id="r3_busca" role="status" '
              u'aria-live="polite"></div>'
