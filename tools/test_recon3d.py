@@ -257,11 +257,11 @@ def teste_a_escolha_da_serie_e_o_popup_da_casca():
                '<div class="ui-ps" id="r3_escolha" data-ui-ps' in p
                and 'data-sozinho>' in p.split('id="r3_escolha"')[1][:160]
                and 'class="ui-guias esq" id="r3_origem" data-ativa="acervo"' in p)
-        checar("[%s] só Anatomia Torácica oferece segmentar um caso novo" % nome,
-               ('id="r3_segmentar_novo"' in p) == (nome == "toracica"))
-        if nome == "toracica":
-            checar("o novo caso abre Rodar agora com instrução para o protocolo torácico",
-                   'href="/lote?protocolo_3d=anatomia_toracica"' in p
+        checar("[%s] Anatomia Geral oferece segmentar um caso novo" % nome,
+               ('id="r3_segmentar_novo"' in p) == (nome == "anatomia"))
+        if nome == "anatomia":
+            checar("o novo caso abre Rodar agora com instrução para Anatomia Geral",
+                   'href="/lote?protocolo_3d=anatomia_geral"' in p
                    and 'data-radai-frase>Segmentar novo caso</span>' in p)
     js = S.JS_SERIE
     checar("abre sozinho so quando a tela chegou sem serie (sem ficha), e nenhuma serie "

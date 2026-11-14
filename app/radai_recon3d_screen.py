@@ -2055,7 +2055,7 @@ FERRAMENTAS_3D = {
 }
 
 PROTOCOLO_TORACICO = u"anatomia_toracica"
-RODAR_ANATOMIA_TORACICA = u"/lote?protocolo_3d=" + PROTOCOLO_TORACICO
+RODAR_ANATOMIA_GERAL = u"/lote?protocolo_3d=anatomia_geral"
 
 def _ajuda_exporta():
     import html
@@ -2160,7 +2160,7 @@ def _html_passo_serie(fer=None):
     escolher = radai_ui.cartao_de_serie(u"r3_cartao", u"r3_escolha",
                                         u"Escolha a série",
                                         chave_modulo=u"recon3d", numero=u"1")
-    if fer == "toracica":
+    if fer == "geral":
         novo = (u'<a class="ui-cartao r3-novo-caso" id="r3_segmentar_novo" '
                 u'href="%s" style="--ui-cartao-cor:var(--mod-recon);'
                 u'--ui-cartao-fraco:var(--mod-recon-fraco)">'
@@ -2169,7 +2169,7 @@ def _html_passo_serie(fer=None):
                 u'data-radai-frase>Segmentar novo caso</span>'
                 u'<span class="ui-cartao-rot" data-radai-frase>Rodar agora</span>'
                 u'</span><span class="ui-cartao-seta" aria-hidden="true">%s</span></a>'
-                % (RODAR_ANATOMIA_TORACICA, radai_ui.icone(u"mais"), radai_ui.icone(u"direita")))
+                % (RODAR_ANATOMIA_GERAL, radai_ui.icone(u"mais"), radai_ui.icone(u"direita")))
         escolher = u'<div class="ui-cartoes">' + escolher + novo + u'</div>'
     return (u'<div class="r3-serie" id="r3_p1">' + escolher
             + u'<div class="r3-estado" id="r3_estado" role="status"></div>'
@@ -2366,7 +2366,8 @@ def montar(app):
 
     @app.get("/recon3d/toracica", response_class=HTMLResponse)
     def _tela_toracica():
-        return radai_menu.aplicar(pagina("toracica"), "recon_torax")
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/recon3d/anatomia", status_code=307)
 
     @app.post("/api/recon3d/acervo")
     async def _acervo(request: Request, ferramenta: str = ""):
